@@ -444,7 +444,13 @@ func (p *pipeline) processRequest(ctx context.Context, request *llm.Request) (*R
 			Stream: false,
 		}
 
-		timeoutCtx, cancel := p.withNonStreamTimeout(ctx)
+		// A client (or an intermediate proxy/CDN) that drops while the upstream is
+		// still generating must not abort the upstream call: without this the
+		// attempt is misrecorded as a client cancellation with no status code and
+		// feeds the cancellation cooldown for a channel that did nothing wrong.
+		// Detach from the inbound cancellation; the non-stream timeout stays the
+		// hard upper bound.
+		timeoutCtx, cancel := p.withNonStreamTimeout(context.WithoutCancel(ctx))
 		response, err := p.notStream(timeoutCtx, executor, httpReq)
 		cancel()
 		if err != nil {

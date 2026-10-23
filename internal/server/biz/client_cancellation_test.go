@@ -31,8 +31,12 @@ func withClientCancellationPolicy(
 }
 
 func canceledPerf(channelID int, projectID int, apiKey string) *PerformanceRecord {
-	perf := &PerformanceRecord{ChannelID: channelID, ProjectID: projectID, APIKey: apiKey}
+	perf := &PerformanceRecord{ChannelID: channelID, ProjectID: projectID, APIKey: apiKey, Stream: true}
 	perf.MarkCanceled()
+	// Cancellations only count after the upstream produced something; give the
+	// record first-token evidence so the cooldown logic applies.
+	firstToken := time.Now()
+	perf.FirstTokenTime = &firstToken
 
 	return perf
 }

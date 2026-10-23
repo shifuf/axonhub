@@ -53,6 +53,17 @@ func createCancellationTestChannel(t *testing.T, ctx context.Context, client *en
 	return row
 }
 
+// cancelAfterFirstTokenExecutor streams one content chunk (so the performance
+// record sees first-token evidence) and then aborts with context.Canceled,
+// mirroring "the client hung up after generation had already started".
+func cancelAfterFirstTokenExecutor() *mockExecutorWithErrorStream {
+	return &mockExecutorWithErrorStream{
+		events: []*httpclient.StreamEvent{
+			{Data: []byte(`{"id":"chatcmpl-cancel","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}`)},
+		},
+		streamErr: context.Canceled,
+	}
+}
 func newCancellationTestEnv(t *testing.T, executor pipeline.Executor, keys []string) *cancellationTestEnv {
 	t.Helper()
 
@@ -140,9 +151,21 @@ func (e *cancellationTestEnv) process(projectID int, apiKey string) error {
 		ctx = contexts.WithChannelAPIKey(ctx, apiKey)
 	}
 
-	_, err := e.orchestrator.Process(ctx, buildTestRequest("gpt-4", "hello", false))
+	result, err := e.orchestrator.Process(ctx, buildTestRequest("gpt-4", "hello", true))
+	if err != nil {
+		return err
+	}
 
-	return err
+	// Drain the event stream so the pipeline finalizes and records performance;
+	// a real HTTP writer would consume it the same way.
+	if result.ChatCompletionStream != nil {
+		for result.ChatCompletionStream.Next() {
+		}
+		_ = result.ChatCompletionStream.Err()
+		_ = result.ChatCompletionStream.Close()
+	}
+
+	return nil
 }
 
 func (e *cancellationTestEnv) getChannel(t *testing.T, id int) *ent.Channel {
@@ -186,17 +209,20 @@ func cancellationSwitchAndCooldownPolicy(threshold, cooldownMinutes int) biz.Cli
 }
 
 func TestClientCancellationCooldown_ThresholdTakesChannelOutOfRotation(t *testing.T) {
-	env := newCancellationTestEnv(t, &mockExecutor{err: context.Canceled}, []string{"key-1"})
+	env := newCancellationTestEnv(t, cancelAfterFirstTokenExecutor(), []string{"key-1"})
 	env.setPolicy(t, cancellationSwitchAndCooldownPolicy(2, 3))
 
 	channelID := env.channelIDs[0]
 
-	// First cancellation only increments the independent counter.
-	require.Error(t, env.process(env.project.ID, "key-1"))
+	// First cancellation only increments the independent counter. Streaming
+	// requests do not return the abort as a Process error; the state machine
+	// below observes the outcome instead.
+	env.process(env.project.ID, "key-1")
+	time.Sleep(200 * time.Millisecond)
 	require.Equal(t, channel.StatusEnabled, env.getChannel(t, channelID).Status)
 
 	// The second one reaches the threshold and starts the cooldown.
-	require.Error(t, env.process(env.project.ID, "key-1"))
+	env.process(env.project.ID, "key-1")
 
 	disabled := env.waitForStatus(t, channelID, channel.StatusDisabled)
 	require.NotNil(t, disabled.AutoDisabledAt)
@@ -223,24 +249,26 @@ func TestClientCancellationCooldown_ThresholdTakesChannelOutOfRotation(t *testin
 }
 
 func TestClientCancellationCooldown_SuccessResetsCounter(t *testing.T) {
-	env := newCancellationTestEnv(t, &mockExecutor{err: context.Canceled}, []string{"key-1"})
+	env := newCancellationTestEnv(t, cancelAfterFirstTokenExecutor(), []string{"key-1"})
 	env.setPolicy(t, cancellationSwitchAndCooldownPolicy(2, 3))
 
 	channelID := env.channelIDs[0]
 
-	require.Error(t, env.process(env.project.ID, "key-1"))
+	env.process(env.project.ID, "key-1")
+	time.Sleep(200 * time.Millisecond)
 
-	// A successful request resets the streak to zero.
-	env.useExecutor(&mockExecutor{response: &httpclient.Response{
-		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": {"application/json"}},
-		Body:       buildMockOpenAIResponse("resp-ok", "gpt-4", "hi", 1, 1),
+	// A successful request resets the streak to zero. Streaming success needs a
+	// full chunk sequence ending with finish_reason so the aggregator completes.
+	env.useExecutor(&mockExecutor{streamEvents: []*httpclient.StreamEvent{
+		{Data: []byte(`{"id":"chatcmpl-ok","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)},
+		{Data: []byte(`{"id":"chatcmpl-ok","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`)},
+		{Data: []byte(`{"id":"chatcmpl-ok","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)},
 	}})
 	require.NoError(t, env.process(env.project.ID, "key-1"))
 
-	// One more cancellation must not trigger the cooldown.
-	env.useExecutor(&mockExecutor{err: context.Canceled})
-	require.Error(t, env.process(env.project.ID, "key-1"))
+	// One more cancellation (after upstream output) must not trigger the cooldown.
+	env.useExecutor(cancelAfterFirstTokenExecutor())
+	env.process(env.project.ID, "key-1")
 
 	time.Sleep(300 * time.Millisecond)
 
@@ -248,7 +276,7 @@ func TestClientCancellationCooldown_SuccessResetsCounter(t *testing.T) {
 }
 
 func TestClientCancellationCooldown_CooldownOnlyDisablesUsedCredential(t *testing.T) {
-	env := newCancellationTestEnv(t, &mockExecutor{err: context.Canceled}, []string{"key-1", "key-2"})
+	env := newCancellationTestEnv(t, cancelAfterFirstTokenExecutor(), []string{"key-1", "key-2"})
 	env.setPolicy(t, biz.ClientCancellationPolicy{
 		Enabled:         true,
 		Threshold:       1,
@@ -259,7 +287,7 @@ func TestClientCancellationCooldown_CooldownOnlyDisablesUsedCredential(t *testin
 
 	channelID := env.channelIDs[0]
 
-	require.Error(t, env.process(env.project.ID, "key-1"))
+	env.process(env.project.ID, "key-1")
 
 	var row *ent.Channel
 
@@ -282,7 +310,7 @@ func TestClientCancellationCooldown_CooldownOnlyDisablesUsedCredential(t *testin
 }
 
 func TestClientCancellationCooldown_ProjectFirstOverride(t *testing.T) {
-	env := newCancellationTestEnv(t, &mockExecutor{err: context.Canceled}, []string{"key-1"})
+	env := newCancellationTestEnv(t, cancelAfterFirstTokenExecutor(), []string{"key-1"})
 	env.setPolicy(t, biz.ClientCancellationPolicy{
 		Enabled:         true,
 		Threshold:       5,
@@ -297,11 +325,12 @@ func TestClientCancellationCooldown_ProjectFirstOverride(t *testing.T) {
 	channelID := env.channelIDs[0]
 
 	// A project without an override keeps the global threshold of 5.
-	require.Error(t, env.process(env.project.ID, "key-1"))
+	env.process(env.project.ID, "key-1")
+	time.Sleep(200 * time.Millisecond)
 	require.Equal(t, channel.StatusEnabled, env.getChannel(t, channelID).Status)
 
 	// The overriding project cools the channel down on the first cancellation.
-	require.Error(t, env.process(42, "key-1"))
+	env.process(42, "key-1")
 
 	disabled := env.waitForStatus(t, channelID, channel.StatusDisabled)
 	require.NotNil(t, disabled.AutoDisableExpiresAt)

@@ -18,6 +18,16 @@ func (svc *ChannelService) evaluateClientCancellationForFailure(ctx context.Cont
 		return false
 	}
 
+	// Only streaming cancellations AFTER the upstream produced something count.
+	// A non-stream request that dies with context.Canceled is always a client-
+	// side abort (proxy/CDN timeout or user giving up) that happened before the
+	// single response could arrive — it says nothing about the channel and must
+	// not feed the cooldown. For streams, first-token evidence proves the
+	// upstream was already delivering when the client hung up.
+	if !perf.Stream || perf.FirstTokenTime == nil {
+		return false
+	}
+
 	retryPolicy := svc.SystemService.RetryPolicyOrDefault(ctx)
 	policy, _ := retryPolicy.ClientCancellationPolicy.EffectiveClientCancellationPolicy(perf.ProjectID)
 	if !policy.Enabled {
