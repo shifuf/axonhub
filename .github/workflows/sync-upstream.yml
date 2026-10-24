@@ -1,10 +1,3 @@
-# Sync the fork's `unstable` branch with the upstream `looplj/axonhub` unstable branch.
-#
-# This workflow ONLY mirrors upstream into the fork's `unstable` branch. It never
-# touches `dev`, so it never triggers the Docker publish workflow. Personal
-# features live on `dev`: after this sync you merge `origin/unstable` into `dev`
-# locally, resolve any conflicts, review the code, and only then push `dev`
-# (which is what triggers the image build).
 name: Sync Upstream unstable
 
 on:
@@ -13,7 +6,7 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
-# The sync action force-pushes the target branch, so it needs write access.
+# The sync force-pushes the target branch, so it needs write access.
 permissions:
   contents: write
 
@@ -32,9 +25,63 @@ jobs:
           persist-credentials: false
 
       - name: Sync upstream changes
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
-        with:
-          target_sync_branch: unstable
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-          upstream_sync_branch: unstable
-          upstream_sync_repo: looplj/axonhub
+        id: sync
+        run: |
+          set -euo pipefail
+
+          git config user.name "axonhub-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+
+          UPSTREAM="https://github.com/looplj/axonhub.git"
+          TARGET_BRANCH="unstable"
+
+          git remote add upstream "$UPSTREAM"
+          # Retry the fetch: transient GitHub-to-GitHub network hiccups were the
+          # most common cause of the previous third-party action failing.
+          for attempt in 1 2 3; do
+            if git fetch upstream "${TARGET_BRANCH}" --tags --force; then
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "::error::failed to fetch ${UPSTREAM} after 3 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          UPSTREAM_SHA="$(git rev-parse "upstream/${TARGET_BRANCH}")"
+          LOCAL_SHA="$(git rev-parse HEAD)"
+          echo "upstream=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "local=${LOCAL_SHA}" >> "$GITHUB_OUTPUT"
+
+          if [ "$UPSTREAM_SHA" = "$LOCAL_SHA" ]; then
+            echo "Already up to date at ${LOCAL_SHA}"
+            exit 0
+          fi
+
+          # The fork's unstable branch is a pure mirror: fast-forward when possible,
+          # otherwise reset to the upstream tip. Local-only commits on this branch
+          # are intentionally discarded (real work belongs on dev).
+          if git merge-base --is-ancestor HEAD "upstream/${TARGET_BRANCH}"; then
+            git merge --ff-only "upstream/${TARGET_BRANCH}"
+          else
+            git reset --hard "upstream/${TARGET_BRANCH}"
+          fi
+
+      - name: Push synced unstable
+        if: steps.sync.outputs.upstream != steps.sync.outputs.local
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/remotes/upstream/unstable:refs/heads/unstable" --force; then
+              echo "Pushed unstable -> $(git rev-parse upstream/unstable)"
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "::error::failed to push unstable after 3 attempts"
+              exit 1
+            fi
+            sleep 10
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
