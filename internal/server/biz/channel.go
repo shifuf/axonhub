@@ -89,6 +89,11 @@ type Channel struct {
 	// apiKeyOverride, if non-empty, forces all outbound transformers to use this key
 	// instead of the channel's normal key selection. Used by the channel key test flow.
 	apiKeyOverride string
+
+	// apiKeyState holds the selection state shared with ChannelService for the
+	// strategies that remember which key is in use (fixed, round_robin_success).
+	// Nil for every other strategy.
+	apiKeyState *apiKeySelectionState
 }
 
 type ChannelServiceParams struct {
@@ -237,6 +242,12 @@ type ChannelService struct {
 	// so read-modify-write updates of channel.ModelCooldowns cannot interleave.
 	modelCooldownsLock sync.Mutex
 
+	// apiKeyStates holds the per-channel key-selection state of the strategies
+	// that must remember their selection across channel snapshots (fixed,
+	// round_robin_success). Guarded by apiKeyStatesLock.
+	apiKeyStates     map[int]*apiKeySelectionState
+	apiKeyStatesLock sync.Mutex
+
 	modelSyncMu            sync.Mutex
 	codexCatalogSF         singleflight.Group
 	codexCatalogProviderSF singleflight.Group
@@ -325,6 +336,10 @@ func (svc *ChannelService) reloadEnabledChannels(ctx context.Context, current []
 
 		// Preload model prices
 		svc.preloadModelPrices(ctx, channel)
+
+		// This build feeds the serving set, so let the success report read its
+		// key array from now on.
+		svc.publishAPIKeySelectionSnapshot(channel)
 
 		channels = append(channels, channel)
 	}
@@ -642,6 +657,10 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 			return nil, err
 		}
 
+		if err := ValidateMaxSingleChannelRetries(input.Settings); err != nil {
+			return nil, err
+		}
+
 		if err := validateModelProtocols(input.Settings, &ent.Channel{Type: input.Type, BaseURL: baseURL, Endpoints: input.Endpoints}); err != nil {
 			return nil, fmt.Errorf("invalid model protocols: %w", err)
 		}
@@ -727,6 +746,22 @@ func (svc *ChannelService) CreateChannel(ctx context.Context, input ent.CreateCh
 	svc.reloadChannelsAfterCommit(ctx)
 
 	return created, nil
+}
+
+// ValidateMaxSingleChannelRetries rejects a per-channel same-channel retry
+// override outside the supported range, so a value written through the API can
+// neither break channel reads nor exceed the editor's bounds.
+func ValidateMaxSingleChannelRetries(settings *objects.ChannelSettings) error {
+	if settings == nil || settings.MaxSingleChannelRetries == nil {
+		return nil
+	}
+
+	value := *settings.MaxSingleChannelRetries
+	if value < 0 || value > 65535 {
+		return fmt.Errorf("invalid max single channel retries %d: must be between 0 and 65535", value)
+	}
+
+	return nil
 }
 
 // NormalizeRetryableStatusCodes validates, deduplicates, and sorts additional
@@ -904,9 +939,14 @@ func normalizeAutoDisableRules(rules []objects.APIKeyAutoDisableRule, allowDelet
 	return normalized, nil
 }
 
-// UpdateChannel updates an existing channel with the provided input.
+// UpdateChannel updates a channel with the provided input. Callers that
+// merge patches onto a previously read snapshot (see UpdateChannelSettings)
+// can carry the snapshot's version in the context via withChannelExpectedVersion;
+// the update is then optimistic-locked against that version and fails with
+// ErrChannelUpdatedConcurrently when the channel was updated concurrently.
 func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent.UpdateChannelInput) (*ent.Channel, error) {
 	log.Debug(ctx, "UpdateChannel", log.Int("id", id))
+	expectedUpdatedAt, _ := ctx.Value(channelExpectedVersionKey{}).(*time.Time)
 	// Snapshot the provider identity before normalizing Command Code settings.
 	// Settings-only updates need this snapshot to reject a concurrent type
 	// change that could otherwise leave a quota cookie on the wrong channel.
@@ -928,7 +968,8 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 	commandCodeQuotaSettings := input.Settings != nil &&
 		(isCommandCodeChannelType(effectiveType) ||
 			(input.Settings.ProviderQuota != nil && input.Settings.ProviderQuota.CommandCode != nil))
-	guardProviderIdentity := input.Type != nil || input.BaseURL != nil || input.Endpoints != nil || commandCodeQuotaSettings
+	guardProviderIdentity := input.Type != nil || input.BaseURL != nil || input.Endpoints != nil || commandCodeQuotaSettings ||
+		expectedUpdatedAt != nil
 
 	// A cleared Command Code quota cookie must invalidate the old persisted
 	// status, regardless of whether the client sent null or an empty object.
@@ -946,6 +987,10 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 		}
 		if sanitizedSettings != nil {
 			input.Settings = sanitizedSettings
+		}
+
+		if err := ValidateMaxSingleChannelRetries(input.Settings); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1093,8 +1138,9 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 	err = svc.RunInTransaction(ctx, func(ctx context.Context) error {
 		db := svc.entFromContext(ctx)
 
-		// Only identity changes and Command Code quota-related settings need
-		// optimistic locking; unrelated channel edits retain their prior behavior.
+		// Only identity changes, Command Code quota-related settings and
+		// caller-supplied version expectations need optimistic locking;
+		// unrelated channel edits retain their prior behavior.
 		mut := db.Channel.UpdateOneID(id).
 			SetNillableType(input.Type).
 			SetNillableBaseURL(input.BaseURL).
@@ -1103,7 +1149,11 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 			SetNillableOrderingWeight(input.OrderingWeight).
 			SetNillableAutoSyncSupportedModels(input.AutoSyncSupportedModels)
 		if guardProviderIdentity {
-			mut.Where(channel.UpdatedAtEQ(existingIdentity.UpdatedAt))
+			guardUpdatedAt := existingIdentity.UpdatedAt
+			if expectedUpdatedAt != nil {
+				guardUpdatedAt = *expectedUpdatedAt
+			}
+			mut.Where(channel.UpdatedAtEQ(guardUpdatedAt))
 		}
 
 		if input.SupportedModels != nil {
@@ -1188,7 +1238,7 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 		channel, err := mut.Save(ctx)
 		if err != nil {
 			if ent.IsNotFound(err) {
-				return fmt.Errorf("channel was updated concurrently; retry the operation")
+				return ErrChannelUpdatedConcurrently
 			}
 			return fmt.Errorf("failed to update channel: %w", err)
 		}
@@ -1306,7 +1356,7 @@ func (svc *ChannelService) SaveChannelEndpoints(ctx context.Context, input SaveC
 		Save(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return nil, errors.New("channel was updated concurrently; retry the operation")
+			return nil, ErrChannelUpdatedConcurrently
 		}
 		return nil, fmt.Errorf("failed to update channel endpoints: %w", err)
 	}
@@ -1323,6 +1373,7 @@ func (svc *ChannelService) DeleteChannel(ctx context.Context, id int) error {
 	}
 
 	svc.forgetLimiter(id)
+	svc.forgetAPIKeySelectionState(id)
 	svc.reloadChannelsAfterCommit(ctx)
 	svc.purgeModelAssociationsForChannels(ctx, []int{id})
 

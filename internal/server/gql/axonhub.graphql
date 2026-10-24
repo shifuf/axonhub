@@ -209,7 +209,10 @@ type ChannelSettings {
   rateLimit: ChannelRateLimit
   retryableStatusCodes: [Int!]
   retryableErrorPatterns: [RetryableErrorPattern!]
+  maxSingleChannelRetries: Int
   modelProtocols: [ModelProtocol!]
+  apiKeyStrategy: String
+  apiKeyRoundRobinSwitchAfter: Int
   providerQuota: ChannelProviderQuotaSettings @goField(forceResolver: true)
   quotaRoutingMode: ChannelQuotaRoutingMode
 }
@@ -293,7 +296,36 @@ input ChannelSettingsInput {
   rateLimit: ChannelRateLimitInput
   retryableStatusCodes: [Int!]
   retryableErrorPatterns: [RetryableErrorPatternInput!]
+  maxSingleChannelRetries: Int
   modelProtocols: [ModelProtocolInput!]
+  apiKeyStrategy: String
+  apiKeyRoundRobinSwitchAfter: Int
+  providerQuota: ChannelProviderQuotaSettingsInput
+  quotaRoutingMode: ChannelQuotaRoutingMode
+}
+
+# A partial patch of channel settings. Absent fields keep their stored
+# values; nested objects replace the stored value as a whole. Use this
+# instead of updateChannel's settings input when only some settings change.
+input UpdateChannelSettingsInput {
+  extraModelPrefix: String
+  modelMappings: [ModelMappingInput!]
+  autoTrimedModelPrefixes: [String!]
+  hideOriginalModels: Boolean
+  hideMappedModels: Boolean
+  lowercaseModelId: Boolean
+  proxy: ProxyConfigInput
+  transformOptions: TransformOptionsInput
+  headerOverrideOperations: [OverrideOperationInput!]
+  bodyOverrideOperations: [OverrideOperationInput!]
+  passThroughUserAgent: Boolean
+  passThroughBody: Boolean
+  rateLimit: ChannelRateLimitInput
+  retryableStatusCodes: [Int!]
+  retryableErrorPatterns: [RetryableErrorPatternInput!]
+  modelProtocols: [ModelProtocolInput!]
+  apiKeyStrategy: String
+  apiKeyRoundRobinSwitchAfter: Int
   providerQuota: ChannelProviderQuotaSettingsInput
   quotaRoutingMode: ChannelQuotaRoutingMode
 }
@@ -980,6 +1012,7 @@ type Mutation {
   duplicateChannel(sourceID: ID!, input: CreateChannelInput!): Channel!
   bulkCreateChannels(input: BulkCreateChannelsInput!): [Channel!]!
   updateChannel(id: ID!, input: UpdateChannelInput!): Channel!
+  updateChannelSettings(id: ID!, input: UpdateChannelSettingsInput!): Channel!
   saveChannelEndpoints(input: SaveChannelEndpointsInput!): Channel!
   detectChannelEndpoints(input: DetectChannelEndpointsInput!): DetectChannelEndpointsPayload!
   updateChannelStatus(id: ID!, status: ChannelStatus!): Channel!

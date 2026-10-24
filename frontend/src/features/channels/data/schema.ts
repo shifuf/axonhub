@@ -126,6 +126,7 @@ export const channelTypeSchema = z.enum([
   'moonshot_coding',
   'jina',
   'typesafe',
+  'cloudflare',
   'github',
   'github_copilot',
   'claudecode',
@@ -361,8 +362,22 @@ export const channelSettingsSchema = z.object({
   rateLimit: channelRateLimitSchema.optional().nullable(),
   retryableStatusCodes: z.array(z.number().int().min(400).max(599)).optional().nullable(),
   retryableErrorPatterns: z.array(retryableErrorPatternSchema).optional().nullable(),
+  // The server persists this as a plain int and does not clamp it, so reads must
+  // tolerate any value an API client could have stored; the editor still bounds
+  // user input. A strict upper bound here can reject a whole channel response.
+  maxSingleChannelRetries: z.number().int().min(0).optional().nullable(),
   modelProtocols: z.array(modelProtocolSchema).optional().nullable(),
   providerQuota: channelProviderQuotaSettingsSchema.optional().nullable(),
+  // The backend stores an empty strategy for "unset" and returns it verbatim, and
+  // an API client may store any string. Normalize every unrecognized value to the
+  // default instead of rejecting it, so such a channel still loads and the
+  // inferred type stays the narrow strategy union the editor expects.
+  apiKeyStrategy: z
+    .enum(['sticky', 'random', 'round_robin', 'round_robin_success', 'priority', 'fixed'])
+    .catch('sticky')
+    .nullable()
+    .optional(),
+  apiKeyRoundRobinSwitchAfter: z.number().int().min(0).max(2147483647).optional().nullable(),
   quotaRoutingMode: z.enum(['INHERIT', 'IGNORE_QUOTA', 'REMOVE_ON_EXHAUSTED', 'BACKPRESSURE']).optional(),
 });
 
@@ -835,10 +850,18 @@ function validateKeyGroups(
 
 // Create Channel Input
 
+// A saved base URL must not keep template placeholders such as <account_id>:
+// the channel would be stored unresolved and only fail on its first request,
+// with an upstream error that hides the cause.
+const channelBaseURLSchema = z
+  .string()
+  .url('Please enter a valid URL')
+  .refine((value) => !/[<>]/.test(value), 'Replace placeholders such as <account_id> with real values');
+
 export const createChannelInputSchema = z
   .object({
     type: channelTypeSchema,
-    baseURL: z.url('Please enter a valid URL'),
+    baseURL: channelBaseURLSchema,
     name: z.string().min(1, 'Name is required'),
     policies: channelPoliciesSchema.optional(),
     supportedModels: z.array(z.string()).min(0, 'At least one supported model is required'),
@@ -953,7 +976,7 @@ export type CreateChannelInput = z.infer<typeof createChannelInputSchema>;
 export const updateChannelInputSchema = z
   .object({
     type: channelTypeSchema.optional(),
-    baseURL: z.string().url('Please enter a valid URL').optional(),
+    baseURL: channelBaseURLSchema.optional(),
     name: z.string().min(1, 'Name is required').optional(),
     policies: channelPoliciesSchema.optional(),
     supportedModels: z.array(z.string()).min(1, 'At least one supported model is required').optional(),
@@ -1063,7 +1086,7 @@ export type ChannelConnection = z.infer<typeof channelConnectionSchema>;
 export const bulkImportChannelItemSchema = z.object({
   type: channelTypeSchema,
   name: z.string().min(1, 'Name is required'),
-  baseURL: z.string().url('Please enter a valid URL').min(1, 'Base URL is required'),
+  baseURL: channelBaseURLSchema,
   apiKey: z.string().min(1, 'API Key is required'),
   supportedModels: z.array(z.string()).min(1, 'At least one supported model is required'),
   defaultTestModel: z.string().min(1, 'Please select a default test model'),
