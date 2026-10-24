@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { graphqlRequest } from '@/gql/graphql';
 import { useTranslation } from 'react-i18next';
@@ -486,4 +487,53 @@ export function useRequestExecutions(
     },
     enabled: !!requestID,
   });
+}
+
+// ---- CSV export -----------------------------------------------------------
+// Export walks the same GraphQL connection the table uses, following cursors
+// until every matching row is fetched or the safety cap is hit. Caps keep a
+// "export everything" click from fetching an unbounded history.
+export const REQUESTS_EXPORT_PAGE_SIZE = 500;
+export const REQUESTS_EXPORT_MAX_ROWS = 10000;
+
+export function useExportAllRequests() {
+  const { handleError } = useErrorHandler();
+  const { t } = useTranslation();
+  const permissions = useRequestPermissions();
+  const selectedProjectId = useSelectedProjectId();
+
+  return useCallback(
+    async (where?: Record<string, any>, maxRows: number = REQUESTS_EXPORT_MAX_ROWS): Promise<Request[]> => {
+      const query = buildRequestsQuery(permissions);
+      const headers = selectedProjectId ? { 'X-Project-ID': selectedProjectId } : undefined;
+      const finalWhere = {
+        ...where,
+        ...(selectedProjectId ? { projectID: selectedProjectId } : {}),
+      };
+
+      const all: Request[] = [];
+      let after: string | undefined;
+
+      while (all.length < maxRows) {
+        const data = await graphqlRequest<{ requests: RequestConnection }>(
+          query,
+          {
+            first: Math.min(REQUESTS_EXPORT_PAGE_SIZE, maxRows - all.length),
+            after,
+            orderBy: { field: 'CREATED_AT', direction: 'DESC' as const },
+            where: finalWhere,
+          },
+          headers
+        );
+        const page = requestConnectionSchema.parse(data?.requests);
+        all.push(...page.edges.map((edge) => edge.node));
+
+        if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) break;
+        after = page.pageInfo.endCursor;
+      }
+
+      return all;
+    },
+    [handleError, t, permissions, selectedProjectId]
+  );
 }

@@ -324,7 +324,8 @@ function normalizeKeyGroupsFromCredentials(
     keyGroups?:
       | { name?: string | null; apiKeys?: string[] | null; apiKey?: string | null; models?: string[] | null; enabled?: boolean }[]
       | null;
-  } | null
+  } | null,
+  legacySupportedModels?: string[]
 ): KeyGroupFormRow[] {
   const groups = (credentials?.keyGroups || []).map((group) => {
     const keys = (group.apiKeys || []).map((key) => (key || '').trim()).filter((key) => key.length > 0);
@@ -365,6 +366,18 @@ function normalizeKeyGroupsFromCredentials(
       models: [],
       enabled: true,
     });
+  }
+
+  // Legacy model migration: pre-group channels kept their model list at channel
+  // level (supportedModels). When no group owns any models yet, fold the channel
+  // list into the first group so the grouped model panel shows the existing
+  // models instead of an empty selection.
+  const anyGroupHasModels = groups.some((group) => (group.models || []).length > 0);
+  if (!anyGroupHasModels && groups.length > 0) {
+    const legacyModels = (legacySupportedModels || []).map((model) => (model || '').trim()).filter(Boolean);
+    if (legacyModels.length > 0) {
+      groups[0].models = legacyModels;
+    }
   }
 
   return groups;
@@ -896,7 +909,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
               // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
               apiKey: currentRow.credentials?.apiKey ?? undefined,
               apiKeys: [],
-              keyGroups: normalizeKeyGroupsFromCredentials(currentRow.credentials),
+              keyGroups: normalizeKeyGroupsFromCredentials(currentRow.credentials, currentRow.supportedModels),
               vertexApiKeys: currentRow.type === 'gemini_vertex' ? (currentRow.credentials?.vertexApiKeys ?? undefined) : [],
               managementApiKey: currentRow.credentials?.managementApiKey || undefined,
               gcp: {
@@ -924,7 +937,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                 // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
                 apiKey: duplicateFromRow.credentials?.apiKey ?? undefined,
                 apiKeys: [],
-                keyGroups: normalizeKeyGroupsFromCredentials(duplicateFromRow.credentials),
+                keyGroups: normalizeKeyGroupsFromCredentials(duplicateFromRow.credentials, duplicateFromRow.supportedModels),
                 vertexApiKeys: duplicateFromRow.type === 'gemini_vertex' ? (duplicateFromRow.credentials?.vertexApiKeys ?? undefined) : [],
                 managementApiKey: duplicateFromRow.credentials?.managementApiKey || undefined,
                 gcp: {

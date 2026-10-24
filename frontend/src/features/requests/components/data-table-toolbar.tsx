@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Cross2Icon } from '@radix-ui/react-icons';
 import { Table } from '@tanstack/react-table';
-import { Filter, GripVertical, Trash2, X } from 'lucide-react';
+import { ChevronDown, Download, Filter, GripVertical, Loader2, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useAuthStore } from '@/stores/authStore';
@@ -11,6 +11,7 @@ import type { AutoRefreshInterval } from '@/hooks/use-auto-refresh-interval';
 import { useDebounce } from '@/hooks/use-debounce';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
@@ -37,6 +38,8 @@ interface DataTableToolbarProps<TData> {
   onAutoRefreshIntervalChange?: (interval: AutoRefreshInterval) => void;
   enableColumnOrdering?: boolean;
   getColumnLabel?: (columnId: string) => string;
+  onExport?: (scope: 'page' | 'all') => void;
+  exportInProgress?: boolean;
 }
 
 interface RequestFilterControlsProps {
@@ -215,6 +218,8 @@ export function DataTableToolbar<TData>({
   onAutoRefreshIntervalChange,
   enableColumnOrdering,
   getColumnLabel,
+  onExport,
+  exportInProgress = false,
 }: DataTableToolbarProps<TData>) {
   const { t } = useTranslation();
   const [showArchivedApiKeys, setShowArchivedApiKeys] = useState(false);
@@ -484,6 +489,21 @@ export function DataTableToolbar<TData>({
             <Trash2 className='mr-2 h-4 w-4' />
             {t('requests.cleanup.action')}
           </Button>
+        )}
+        {onExport && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant='outline' size='sm' className='h-8' disabled={exportInProgress} data-testid='requests-export'>
+                {exportInProgress ? <Loader2 className='mr-2 h-4 w-4 animate-spin' /> : <Download className='mr-2 h-4 w-4' />}
+                {t('requests.export.label')}
+                <ChevronDown className='ml-1 h-4 w-4' />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align='end'>
+              <DropdownMenuItem onClick={() => onExport('page')}>{t('requests.export.currentPage')}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onExport('all')}>{t('requests.export.allMatching')}</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
         <DataTableViewOptions table={table} />
         {canCleanupLogs && (

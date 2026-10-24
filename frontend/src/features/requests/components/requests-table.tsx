@@ -15,6 +15,7 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 import type { DateTimeRangeValue } from '@/utils/date-range';
 import type { AutoRefreshInterval } from '@/hooks/use-auto-refresh-interval';
@@ -24,6 +25,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { TableSkeleton } from '@/components/ui/table-skeleton';
 import { ServerSidePagination } from '@/components/server-side-pagination';
 import { Request, RequestConnection } from '../data/schema';
+import { useExportAllRequests } from '../data/requests';
+import { buildRequestsCsv, downloadCsv, type RequestsExportScope } from '../utils/csv-export';
 import { DataTableToolbar } from './data-table-toolbar';
 import { RequestBodyDrawer } from './request-body-drawer';
 import { DEFAULT_HIDDEN_COLUMN_IDS, DEFAULT_MOBILE_HIDDEN_COLUMN_IDS, useRequestsColumns } from './requests-columns';
@@ -322,6 +325,74 @@ export function RequestsTable({
     manualFiltering: true, // Enable manual filtering for server-side filtering
   });
 
+  const [exportInProgress, setExportInProgress] = useState(false);
+  const exportAllRequests = useExportAllRequests();
+
+  const handleExport = useCallback(
+    async (scope: RequestsExportScope) => {
+      try {
+        setExportInProgress(true);
+
+        let rows: Request[];
+        if (scope === 'page') {
+          rows = table.getRowModel().rows.map((row) => row.original);
+        } else {
+          rows = await exportAllRequests(queryWhere);
+        }
+
+        if (rows.length === 0) {
+          toast.warning(t('requests.export.empty'));
+          return;
+        }
+
+        const visibleColumnIds = new Set(
+          table.getAllLeafColumns().filter((column) => column.getIsVisible()).map((column) => column.id)
+        );
+        const csv = buildRequestsCsv(rows, {
+          visibleColumnIds,
+          labels: {
+            id: 'ID',
+            status: t('requests.filters.status'),
+            source: t('requests.columns.source'),
+            model: t('requests.columns.model'),
+            apiFormat: t('requests.columns.apiFormat'),
+            channel: t('requests.columns.channel'),
+            key: t('requests.columns.channelAPIKeyIndex'),
+            clientIP: t('requests.columns.clientIP'),
+            userAgent: t('requests.columns.userAgent'),
+            tokens: t('requests.columns.tokens'),
+            totalTokens: t('requests.columns.totalTokens'),
+            input: t('requests.columns.input'),
+            output: t('requests.columns.output'),
+            reasoning: t('requests.columns.reasoning'),
+            readCache: t('requests.columns.readCache'),
+            writeCache: t('requests.columns.writeCache'),
+            cost: t('requests.columns.cost'),
+            duration: t('requests.columns.duration'),
+            firstToken: t('requests.duration.firstToken'),
+            total: t('requests.duration.total'),
+            tokensPerSecond: t('requests.columns.tokensPerSecond'),
+            caller: t('requests.columns.caller'),
+            createdAt: t('common.columns.createdAt'),
+          },
+        });
+
+        const stamped = new Date();
+        const pad = (n: number) => n.toString().padStart(2, '0');
+        const filename = `requests-${stamped.getFullYear()}${pad(stamped.getMonth() + 1)}${pad(stamped.getDate())}-${pad(stamped.getHours())}${pad(stamped.getMinutes())}${pad(stamped.getSeconds())}.csv`;
+        downloadCsv(filename, csv);
+        toast.success(t('requests.export.success', { count: rows.length }));
+      } catch {
+        toast.error(t('requests.export.failed'));
+      } finally {
+        setExportInProgress(false);
+      }
+    },
+    [exportAllRequests, queryWhere, t, table]
+  );
+
+
+
   return (
     <div className='flex flex-1 flex-col overflow-hidden'>
       <DataTableToolbar
@@ -335,6 +406,8 @@ export function RequestsTable({
         onAutoRefreshIntervalChange={onAutoRefreshIntervalChange}
         enableColumnOrdering
         getColumnLabel={(id) => t(`requests.columns.${id}`, { defaultValue: id })}
+        onExport={handleExport}
+        exportInProgress={exportInProgress}
       />
       <div className='shadow-soft relative mt-2 flex-1 overflow-auto rounded-2xl border border-[var(--table-border)] sm:mt-4'>
         <div className='min-w-max'>
