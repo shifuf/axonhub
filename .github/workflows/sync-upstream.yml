@@ -1,9 +1,9 @@
 name: Sync Upstream unstable
 
+# Scheduled sync is intentionally disabled: GitHub disabled Actions on this
+# repository and daily force-push automations on forks are a common
+# abuse-detection trigger. Sync manually when needed via workflow_dispatch.
 on:
-  schedule:
-    # Every day at 00:00 UTC.
-    - cron: '0 0 * * *'
   workflow_dispatch:
 
 # The sync force-pushes the target branch, so it needs write access.
