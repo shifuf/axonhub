@@ -1,8 +1,9 @@
 name: Publish Docker image (unstable)
 
+# Daily schedule removed: scheduled automations on forks are a common
+# abuse-detection trigger (GitHub disabled Actions on this repo once before).
+# Build the unstable image on demand via workflow_dispatch.
 on:
-  schedule:
-    - cron: '17 3 * * *'
   workflow_dispatch:
 
 jobs:

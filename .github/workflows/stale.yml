@@ -1,9 +1,8 @@
 name: Stale Issues Management
 
+# Daily schedule removed: scheduled automations on forks are a common
+# abuse-detection trigger. Run manually via workflow_dispatch when needed.
 on:
-  schedule:
-    # Run daily at 00:00 UTC
-    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
