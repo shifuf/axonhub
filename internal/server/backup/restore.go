@@ -82,12 +82,6 @@ func (svc *BackupService) Restore(ctx context.Context, data []byte, opts Restore
 }
 
 func (svc *BackupService) restore(ctx context.Context, db *ent.Client, backupData BackupData, opts RestoreOptions) error {
-	if opts.IncludeSystemConfigs {
-		if err := svc.restoreSystemConfigs(ctx, db, backupData.SystemConfigs); err != nil {
-			return err
-		}
-	}
-
 	if opts.IncludeChannels {
 		if err := svc.restoreChannels(ctx, db, backupData.Channels, opts); err != nil {
 			return err
@@ -98,7 +92,16 @@ func (svc *BackupService) restore(ctx context.Context, db *ent.Client, backupDat
 	if err != nil {
 		return err
 	}
+
 	if opts.IncludeSystemConfigs {
+		// Rewrite channel IDs referenced by system model settings so they follow
+		// the channels actually present in the target database.
+		remapSystemModelSettingsChannelIDs(ctx, backupData.SystemConfigs, channelIDMap)
+
+		if err := svc.restoreSystemConfigs(ctx, db, backupData.SystemConfigs); err != nil {
+			return err
+		}
+
 		if err := svc.restoreLegacyQuotaRouting(ctx, db, backupData.SystemConfigs, channelIDMap, opts.IncludeChannels); err != nil {
 			return err
 		}
@@ -396,48 +399,121 @@ func (r *usageRestoreResolver) resolveAPIKeyID(apiKeyKey string) (int, bool) {
 }
 
 func remapModelSettingsChannelIDs(settings *objects.ModelSettings, channelIDMap map[int]int) {
-	if settings == nil || len(channelIDMap) == 0 {
+	if settings == nil {
 		return
 	}
 
-	for _, assoc := range settings.Associations {
+	remapModelAssociationsChannelIDs(settings.Associations, channelIDMap)
+}
+
+// remapModelAssociationsChannelIDs rewrites channel IDs inside model
+// associations so they follow the channels actually present in the target
+// database after a restore. It returns true when at least one ID was remapped.
+func remapModelAssociationsChannelIDs(associations []*objects.ModelAssociation, channelIDMap map[int]int) bool {
+	if len(channelIDMap) == 0 {
+		return false
+	}
+
+	changed := false
+
+	for _, assoc := range associations {
 		if assoc == nil {
 			continue
 		}
 
 		if assoc.ChannelModel != nil {
-			if newID, ok := channelIDMap[assoc.ChannelModel.ChannelID]; ok {
+			if newID, ok := channelIDMap[assoc.ChannelModel.ChannelID]; ok && newID != assoc.ChannelModel.ChannelID {
 				assoc.ChannelModel.ChannelID = newID
+				changed = true
 			}
 		}
 
 		if assoc.ChannelRegex != nil {
-			if newID, ok := channelIDMap[assoc.ChannelRegex.ChannelID]; ok {
+			if newID, ok := channelIDMap[assoc.ChannelRegex.ChannelID]; ok && newID != assoc.ChannelRegex.ChannelID {
 				assoc.ChannelRegex.ChannelID = newID
+				changed = true
 			}
 		}
 
-		if assoc.Regex != nil {
-			remapExcludeAssociationChannelIDs(assoc.Regex.Exclude, channelIDMap)
+		if assoc.Regex != nil && remapExcludeAssociationChannelIDs(assoc.Regex.Exclude, channelIDMap) {
+			changed = true
 		}
 
-		if assoc.ModelID != nil {
-			remapExcludeAssociationChannelIDs(assoc.ModelID.Exclude, channelIDMap)
+		if assoc.ModelID != nil && remapExcludeAssociationChannelIDs(assoc.ModelID.Exclude, channelIDMap) {
+			changed = true
 		}
 	}
+
+	return changed
 }
 
-func remapExcludeAssociationChannelIDs(exclude []*objects.ExcludeAssociation, channelIDMap map[int]int) {
+func remapExcludeAssociationChannelIDs(exclude []*objects.ExcludeAssociation, channelIDMap map[int]int) bool {
+	if len(channelIDMap) == 0 {
+		return false
+	}
+
+	changed := false
+
 	for _, ex := range exclude {
 		if ex == nil || len(ex.ChannelIds) == 0 {
 			continue
 		}
 
 		for i, oldID := range ex.ChannelIds {
-			if newID, ok := channelIDMap[oldID]; ok {
+			if newID, ok := channelIDMap[oldID]; ok && newID != oldID {
 				ex.ChannelIds[i] = newID
+				changed = true
 			}
 		}
+	}
+
+	return changed
+}
+
+// remapSystemModelSettingsChannelIDs rewrites channel IDs referenced by the
+// system_model_settings developer association rules so they follow the
+// channels actually present in the target database after a restore. Entries
+// that cannot be resolved keep their original ID.
+func remapSystemModelSettingsChannelIDs(ctx context.Context, configs []*BackupSystemConfig, channelIDMap map[int]int) {
+	if len(channelIDMap) == 0 {
+		return
+	}
+
+	for _, config := range configs {
+		if config == nil || config.Key != biz.SystemKeyModelSettings {
+			continue
+		}
+
+		var settings biz.SystemModelSettings
+		if err := json.Unmarshal([]byte(config.Value), &settings); err != nil {
+			log.Warn(ctx, "failed to decode system model settings for channel ID remapping",
+				log.Cause(err))
+			continue
+		}
+
+		changed := false
+		for _, developer := range settings.DeveloperSettings {
+			if developer == nil {
+				continue
+			}
+
+			if remapModelAssociationsChannelIDs(developer.Associations, channelIDMap) {
+				changed = true
+			}
+		}
+
+		if !changed {
+			continue
+		}
+
+		updated, err := json.Marshal(&settings)
+		if err != nil {
+			log.Warn(ctx, "failed to encode remapped system model settings",
+				log.Cause(err))
+			continue
+		}
+
+		config.Value = string(updated)
 	}
 }
 
@@ -707,8 +783,19 @@ func (svc *BackupService) restoreChannels(ctx context.Context, db *ent.Client, c
 		}
 
 		credentials := chData.Credentials
-		// Check if credentials are empty (no API key and no OAuth)
-		if credentials.APIKey == "" && len(credentials.APIKeys) == 0 && credentials.OAuth == nil {
+		// Check if credentials are empty (no API key, key group, OAuth or other
+		// provider credential). A channel without any credential cannot work, so
+		// it is skipped instead of being restored in a broken state.
+		if credentials.APIKey == "" &&
+			len(credentials.APIKeys) == 0 &&
+			len(credentials.KeyGroups) == 0 &&
+			len(credentials.VertexAPIKeys) == 0 &&
+			credentials.ManagementAPIKey == "" &&
+			credentials.OAuth == nil &&
+			credentials.Azure == nil &&
+			(credentials.GCP == nil || credentials.GCP.JSONData == "") {
+			log.Warn(ctx, "skipping channel without credentials",
+				log.String("channel", chData.Name))
 			continue
 		}
 

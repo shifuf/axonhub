@@ -161,6 +161,7 @@ locales_backup
 
 # Local dev artifacts
 axonhub.exe
+/axonhub*.exe*
 axonhub
 *.local.db
 .snow/
