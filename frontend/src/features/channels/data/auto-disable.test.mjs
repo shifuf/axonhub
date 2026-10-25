@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
-import ts from 'typescript';
 import { z } from 'zod';
+import { loadTS } from '../../../../tests/unit-loader.mjs';
 
 const dataDir = import.meta.dirname;
 const srcRoot = join(dataDir, '..', '..', '..');
@@ -12,14 +12,6 @@ function read(relativePath) {
   return readFileSync(join(srcRoot, relativePath), 'utf8');
 }
 
-const source = read('features/channels/data/auto-disable.ts');
-const transpiled = ts.transpileModule(source, {
-  compilerOptions: {
-    module: ts.ModuleKind.ESNext,
-    target: ts.ScriptTarget.ES2023,
-  },
-}).outputText;
-const moduleUrl = `data:text/javascript;base64,${Buffer.from(transpiled).toString('base64')}`;
 const {
   RECOMMENDED_GLOBAL_AUTO_DISABLE_RULES,
   availabilityPoliciesPayload,
@@ -27,7 +19,7 @@ const {
   effectiveAutoDisableMode,
   serializeApiKeyAutoDisableRules,
   toApiKeyAutoDisableRuleFormValues,
-} = await import(moduleUrl);
+} = loadTS('features/channels/data/auto-disable.ts');
 
 test('effectiveAutoDisableMode keeps explicit off even without rules', () => {
   assert.equal(effectiveAutoDisableMode({ apiKeyAutoDisableMode: 'off', apiKeyAutoDisableRules: [] }), 'off');
@@ -92,10 +84,12 @@ test('availabilityPoliciesPayload clears rules on inherit and keeps them on off'
       statusCodes: [401],
       keywordPatterns: [],
       times: 3,
-      action: 'permanent_disable',
-      disableDurationMinutes: null,
+      action: 'temporary_disable',
+      disableDurationMinutes: 30,
       disableUntilCron: null,
       disableUntilTimezone: null,
+      windowMinutes: 10,
+      freezeModel: true,
     },
   ]);
 });
@@ -107,10 +101,10 @@ test('availabilityPoliciesPayload downgrades empty custom to inherit', () => {
   assert.equal(payload.apiKeyAutoDisableRules, null);
 });
 
-test('recommended global rules are 401x3 permanent and 429x3 temporary 30 minutes', () => {
+test('recommended global 401 and 429 rules both cool down the model for 30 minutes in a 10 minute window', () => {
   assert.deepEqual(RECOMMENDED_GLOBAL_AUTO_DISABLE_RULES, [
-    { statusCodes: [401], times: 3, action: 'permanent_disable' },
-    { statusCodes: [429], times: 3, action: 'temporary_disable', disableDurationMinutes: 30 },
+    { statusCodes: [401], times: 3, action: 'temporary_disable', disableDurationMinutes: 30, windowMinutes: 10, freezeModel: true },
+    { statusCodes: [429], times: 3, action: 'temporary_disable', disableDurationMinutes: 30, windowMinutes: 10, freezeModel: true },
   ]);
 });
 
@@ -136,6 +130,8 @@ test('serialize strips schedule fields that do not belong to the selected action
       disableDurationMinutes: 15,
       disableUntilCron: null,
       disableUntilTimezone: null,
+      windowMinutes: 10,
+      freezeModel: true,
     },
   ]);
 });
@@ -153,10 +149,12 @@ test('channel and retry-policy GraphQL selections load the new auto-disable fiel
     assert.match(selection, /apiKeyAutoDisableRules/, 'channel policies selection should include rules');
   }
 
-  assert.match(systemData, /autoDisableChannel \{\s*enabled\s*rules \{/, 'retryPolicy query should request rules, not statuses');
+  assert.match(systemData, /autoDisableChannel \{\s*enabled\s*(?:permanentFailureThreshold\s*)?rules \{/, 'retryPolicy query should request rules, not statuses');
   assert.doesNotMatch(systemData, /autoDisableChannel \{\s*enabled\s*statuses/, 'retryPolicy query must not request removed statuses');
   assert.match(retrySettings, /RECOMMENDED_GLOBAL_AUTO_DISABLE_RULES/, 'retry settings should insert the shared recommended rules');
-  assert.match(retrySettings, /allowDelete=\{false\}/, 'global editor must not offer credential deletion');
+  for (const path of ['features/channels/components/api-key-auto-disable-rules-editor.tsx', 'features/channels/components/channels-availability-dialog.tsx', 'features/channels/components/channels-bulk-auto-disable-dialog.tsx', 'features/system/components/retry-settings.tsx']) {
+    assert.doesNotMatch(read(path), /allowDelete/, 'automatic rule editors must never offer credential deletion');
+  }
   assert.match(availabilityDialog, /availabilityPoliciesPayload/, 'availability save must use the shared payload helper');
   assert.match(availabilityDialog, /off\.savedRulesHint/, 'off mode must show saved rules as inactive');
 });

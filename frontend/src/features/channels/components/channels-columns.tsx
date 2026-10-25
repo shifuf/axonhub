@@ -54,6 +54,7 @@ import { getChannelQuotaRoutingIndicator } from '../utils/quota-routing-status';
 import { ChannelHealthCell } from './channel-health-cell';
 import { ChannelLimiterCell } from './channel-limiter-cell';
 import { ChannelsStatusDialog } from './channels-status-dialog';
+import { CooldownDetails, useCooldownNow } from './cooldown-details';
 import { ChatProtocolIcon, MessagesProtocolIcon, ResponsesProtocolIcon } from './endpoint-protocol-icons';
 import { RELAY_PROTOCOLS, RELAY_PROTOCOL_LABEL_KEYS, getChannelRelayProtocols, type RelayProtocol } from '../data/relay-protocols';
 
@@ -421,7 +422,7 @@ function getProxyURLSummary(proxyURL: string): { label: string; detail?: string 
 // getCooldownRemainingMinutes reports how many minutes are left in a temporary
 // disable window (auto disable or client-cancellation cooldown). Zero means the
 // channel is not cooling down right now.
-function getCooldownRemainingMinutes(channel: Channel): number {
+function getCooldownRemainingMinutes(channel: Channel, now = Date.now()): number {
   if (channel.status !== 'disabled' || !channel.autoDisableExpiresAt) {
     return 0;
   }
@@ -431,7 +432,7 @@ function getCooldownRemainingMinutes(channel: Channel): number {
     return 0;
   }
 
-  const remainingMs = expiresAt - Date.now();
+  const remainingMs = expiresAt - now;
   if (remainingMs <= 0) {
     return 0;
   }
@@ -444,7 +445,8 @@ const NameCell = memo(({ row, globalDefaultMode }: { row: Row<Channel>; globalDe
   const { t } = useTranslation();
   const channel = row.original;
   const hasError = channel.errorMessage != null;
-  const cooldownMinutes = getCooldownRemainingMinutes(channel);
+  const now = useCooldownNow(channel.status === 'disabled');
+  const cooldownMinutes = getCooldownRemainingMinutes(channel, now);
   const isCoolingDown = cooldownMinutes > 0;
   // The backend marks a client-cancellation cooldown with a dedicated reason so
   // operators can tell it apart from a status-code auto-disable cooldown.
@@ -509,7 +511,7 @@ const NameCell = memo(({ row, globalDefaultMode }: { row: Row<Channel>; globalDe
     </div>
   );
 
-  if (!hasError && !hasDisabledKeys && !quotaRoutingIndicator && !isCoolingDown) {
+  if (!hasError && !hasDisabledKeys && !quotaRoutingIndicator && !isCoolingDown && channel.status !== 'disabled') {
     return content;
   }
 
@@ -532,6 +534,9 @@ const NameCell = memo(({ row, globalDefaultMode }: { row: Row<Channel>; globalDe
               </p>
               <p className='text-muted-foreground text-xs'>{t(cooldownDescriptionKey)}</p>
             </div>
+          )}
+          {channel.status === 'disabled' && (
+            <CooldownDetails expiresAt={channel.autoDisableExpiresAt} now={now} showRemaining={!isCoolingDown} />
           )}
           {hasDisabledKeys && (
             <p className='text-sm text-amber-500'>{t('channels.actions.disabledAPIKeys', { count: disabledKeysCount })}</p>

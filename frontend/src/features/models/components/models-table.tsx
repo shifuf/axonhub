@@ -28,7 +28,7 @@ import { PermissionGuard } from '@/components/permission-guard';
 import { useModelSettings } from '@/features/system/data/system';
 import { useModels } from '../context/models-context';
 import { Model } from '../data/schema';
-import { useFrozenModelChannels } from '../data/models';
+import { ModelFrozenChannelsSection } from './model-frozen-channels-section';
 
 const MotionTableRow = motion.create(TableRow);
 

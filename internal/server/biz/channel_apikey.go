@@ -443,6 +443,10 @@ func (svc *ChannelService) cleanupExpiredDisabledAPIKeys(ctx context.Context) {
 	defer cancel()
 	ctx = authz.WithSystemBypass(ctx, "channel-cleanup-expired-disabled-api-keys")
 
+	// The persisted failure windows only need rows inside the longest window;
+		// purge the rest here so the table cannot grow without bound.
+	svc.purgeExpiredChannelFailureEvents(ctx, time.Now())
+
 	channelIDs, err := svc.entFromContext(ctx).Channel.Query().
 		Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).
 		IDs(ctx)

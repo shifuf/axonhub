@@ -431,8 +431,11 @@ export function useRequestsColumns(options?: UseRequestsColumnsOptions): ColumnD
                         <IconArrowsJoin2 className='h-3.5 w-3.5 opacity-80' />
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent side='right' className='border-rose-200 bg-white p-0 dark:bg-zinc-900'>
-                      <div className='flex min-w-[240px] flex-col'>
+                    <TooltipContent
+                      side='right'
+                      className='max-h-[min(70vh,480px)] w-[420px] max-w-[calc(100vw-2rem)] overflow-y-auto border-rose-200 bg-white p-0 dark:bg-zinc-900'
+                    >
+                      <div className='flex min-w-0 flex-col'>
                         <div className='flex flex-col gap-1 border-b bg-rose-50/50 p-3 dark:bg-rose-900/10'>
                           <div className='flex items-center gap-2 text-xs font-bold tracking-wider text-rose-900 uppercase dark:text-rose-300'>
                             <IconArrowsJoin2 className='h-3.5 w-3.5' />
@@ -443,12 +446,12 @@ export function useRequestsColumns(options?: UseRequestsColumnsOptions): ColumnD
                           {sortedExecutions.map((exe, idx) => (
                             <div
                               key={exe.id || idx}
-                              className='hover:bg-muted/50 flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors'
+                              className='hover:bg-muted/50 flex items-start gap-2 rounded-md px-2 py-1.5 transition-colors'
                             >
                               <Badge className={`${getStatusColor(exe.status || '')} h-5 shrink-0 px-1.5 text-[10px] font-bold uppercase`}>
                                 {exe.status ? t(`requests.status.${exe.status}`) : t('requests.columns.unknown')}
                               </Badge>
-                              <div className='flex min-w-0 flex-col'>
+                              <div className='flex min-w-0 flex-1 flex-col gap-1'>
                                 <span className='text-foreground truncate text-xs font-semibold'>
                                   {exe.channel?.name || t('requests.columns.unknown')}
                                 </span>
@@ -456,6 +459,16 @@ export function useRequestsColumns(options?: UseRequestsColumnsOptions): ColumnD
                                   <span className='text-muted-foreground text-[10px]'>
                                     {format(new Date(exe.createdAt), 'HH:mm:ss', { locale })}
                                   </span>
+                                )}
+                                {exe.status === 'failed' && (
+                                  <div className='text-destructive flex flex-col gap-1 text-xs'>
+                                    {exe.responseStatusCode != null && (
+                                      <span className='font-mono text-[10px] font-semibold'>HTTP {exe.responseStatusCode}</span>
+                                    )}
+                                    <p className='whitespace-pre-wrap [overflow-wrap:anywhere]'>
+                                      {exe.errorMessage?.trim() || t('common.errors.unknownError')}
+                                    </p>
+                                  </div>
                                 )}
                               </div>
                             </div>

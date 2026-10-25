@@ -441,9 +441,6 @@ func maybeEvaluateChannelAPIKeyRulesOnFailure(
 	if !ok && outbound.state.Perf != nil {
 		apiKey = outbound.state.Perf.APIKey
 	}
-	if apiKey == "" {
-		return
-	}
 
 	outbound.state.ChannelService.EvaluateAPIKeyRulesForFailure(
 		ctx,
@@ -451,5 +448,6 @@ func maybeEvaluateChannelAPIKeyRulesOnFailure(
 		apiKey,
 		ExtractErrorCode(rawErr),
 		extractErrorMessageForMatching(rawErr),
+		outbound.state.OriginalModel,
 	)
 }

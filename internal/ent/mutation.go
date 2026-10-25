@@ -14,6 +14,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/apikey"
 	"github.com/looplj/axonhub/internal/ent/apikeyprofiletemplate"
 	"github.com/looplj/axonhub/internal/ent/channel"
+	"github.com/looplj/axonhub/internal/ent/channelfailureevent"
 	"github.com/looplj/axonhub/internal/ent/channelmodelprice"
 	"github.com/looplj/axonhub/internal/ent/channelmodelpriceversion"
 	"github.com/looplj/axonhub/internal/ent/channeloverridetemplate"
@@ -52,6 +53,7 @@ const (
 	TypeAPIKey                   = "APIKey"
 	TypeAPIKeyProfileTemplate    = "APIKeyProfileTemplate"
 	TypeChannel                  = "Channel"
+	TypeChannelFailureEvent      = "ChannelFailureEvent"
 	TypeChannelModelPrice        = "ChannelModelPrice"
 	TypeChannelModelPriceVersion = "ChannelModelPriceVersion"
 	TypeChannelOverrideTemplate  = "ChannelOverrideTemplate"
@@ -4562,6 +4564,941 @@ func (m *ChannelMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown Channel edge %s", name)
+}
+
+// ChannelFailureEventMutation represents an operation that mutates the ChannelFailureEvent nodes in the graph.
+type ChannelFailureEventMutation struct {
+	config
+	op              Op
+	typ             string
+	id              *int
+	created_at      *time.Time
+	updated_at      *time.Time
+	channel_id      *int
+	addchannel_id   *int
+	model           *string
+	rule_key        *string
+	rule_key_hash   *string
+	window_key      *string
+	window_key_hash *string
+	status_code     *int
+	addstatus_code  *int
+	error_detail    *string
+	failed_at       *time.Time
+	clearedFields   map[string]struct{}
+	done            bool
+	oldValue        func(context.Context) (*ChannelFailureEvent, error)
+	predicates      []predicate.ChannelFailureEvent
+}
+
+var _ ent.Mutation = (*ChannelFailureEventMutation)(nil)
+
+// channelfailureeventOption allows management of the mutation configuration using functional options.
+type channelfailureeventOption func(*ChannelFailureEventMutation)
+
+// newChannelFailureEventMutation creates new mutation for the ChannelFailureEvent entity.
+func newChannelFailureEventMutation(c config, op Op, opts ...channelfailureeventOption) *ChannelFailureEventMutation {
+	m := &ChannelFailureEventMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeChannelFailureEvent,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withChannelFailureEventID sets the ID field of the mutation.
+func withChannelFailureEventID(id int) channelfailureeventOption {
+	return func(m *ChannelFailureEventMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ChannelFailureEvent
+		)
+		m.oldValue = func(ctx context.Context) (*ChannelFailureEvent, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ChannelFailureEvent.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withChannelFailureEvent sets the old ChannelFailureEvent of the mutation.
+func withChannelFailureEvent(node *ChannelFailureEvent) channelfailureeventOption {
+	return func(m *ChannelFailureEventMutation) {
+		m.oldValue = func(context.Context) (*ChannelFailureEvent, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ChannelFailureEventMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ChannelFailureEventMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ChannelFailureEventMutation) ID() (id int, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ChannelFailureEventMutation) IDs(ctx context.Context) ([]int, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ChannelFailureEvent.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *ChannelFailureEventMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *ChannelFailureEventMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *ChannelFailureEventMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *ChannelFailureEventMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *ChannelFailureEventMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *ChannelFailureEventMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// SetChannelID sets the "channel_id" field.
+func (m *ChannelFailureEventMutation) SetChannelID(i int) {
+	m.channel_id = &i
+	m.addchannel_id = nil
+}
+
+// ChannelID returns the value of the "channel_id" field in the mutation.
+func (m *ChannelFailureEventMutation) ChannelID() (r int, exists bool) {
+	v := m.channel_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChannelID returns the old "channel_id" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldChannelID(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChannelID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChannelID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChannelID: %w", err)
+	}
+	return oldValue.ChannelID, nil
+}
+
+// AddChannelID adds i to the "channel_id" field.
+func (m *ChannelFailureEventMutation) AddChannelID(i int) {
+	if m.addchannel_id != nil {
+		*m.addchannel_id += i
+	} else {
+		m.addchannel_id = &i
+	}
+}
+
+// AddedChannelID returns the value that was added to the "channel_id" field in this mutation.
+func (m *ChannelFailureEventMutation) AddedChannelID() (r int, exists bool) {
+	v := m.addchannel_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetChannelID resets all changes to the "channel_id" field.
+func (m *ChannelFailureEventMutation) ResetChannelID() {
+	m.channel_id = nil
+	m.addchannel_id = nil
+}
+
+// SetModel sets the "model" field.
+func (m *ChannelFailureEventMutation) SetModel(s string) {
+	m.model = &s
+}
+
+// Model returns the value of the "model" field in the mutation.
+func (m *ChannelFailureEventMutation) Model() (r string, exists bool) {
+	v := m.model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldModel returns the old "model" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldModel: %w", err)
+	}
+	return oldValue.Model, nil
+}
+
+// ResetModel resets all changes to the "model" field.
+func (m *ChannelFailureEventMutation) ResetModel() {
+	m.model = nil
+}
+
+// SetRuleKey sets the "rule_key" field.
+func (m *ChannelFailureEventMutation) SetRuleKey(s string) {
+	m.rule_key = &s
+}
+
+// RuleKey returns the value of the "rule_key" field in the mutation.
+func (m *ChannelFailureEventMutation) RuleKey() (r string, exists bool) {
+	v := m.rule_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuleKey returns the old "rule_key" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldRuleKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuleKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuleKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuleKey: %w", err)
+	}
+	return oldValue.RuleKey, nil
+}
+
+// ResetRuleKey resets all changes to the "rule_key" field.
+func (m *ChannelFailureEventMutation) ResetRuleKey() {
+	m.rule_key = nil
+}
+
+// SetRuleKeyHash sets the "rule_key_hash" field.
+func (m *ChannelFailureEventMutation) SetRuleKeyHash(s string) {
+	m.rule_key_hash = &s
+}
+
+// RuleKeyHash returns the value of the "rule_key_hash" field in the mutation.
+func (m *ChannelFailureEventMutation) RuleKeyHash() (r string, exists bool) {
+	v := m.rule_key_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuleKeyHash returns the old "rule_key_hash" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldRuleKeyHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuleKeyHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuleKeyHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuleKeyHash: %w", err)
+	}
+	return oldValue.RuleKeyHash, nil
+}
+
+// ResetRuleKeyHash resets all changes to the "rule_key_hash" field.
+func (m *ChannelFailureEventMutation) ResetRuleKeyHash() {
+	m.rule_key_hash = nil
+}
+
+// SetWindowKey sets the "window_key" field.
+func (m *ChannelFailureEventMutation) SetWindowKey(s string) {
+	m.window_key = &s
+}
+
+// WindowKey returns the value of the "window_key" field in the mutation.
+func (m *ChannelFailureEventMutation) WindowKey() (r string, exists bool) {
+	v := m.window_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWindowKey returns the old "window_key" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldWindowKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWindowKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWindowKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWindowKey: %w", err)
+	}
+	return oldValue.WindowKey, nil
+}
+
+// ResetWindowKey resets all changes to the "window_key" field.
+func (m *ChannelFailureEventMutation) ResetWindowKey() {
+	m.window_key = nil
+}
+
+// SetWindowKeyHash sets the "window_key_hash" field.
+func (m *ChannelFailureEventMutation) SetWindowKeyHash(s string) {
+	m.window_key_hash = &s
+}
+
+// WindowKeyHash returns the value of the "window_key_hash" field in the mutation.
+func (m *ChannelFailureEventMutation) WindowKeyHash() (r string, exists bool) {
+	v := m.window_key_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWindowKeyHash returns the old "window_key_hash" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldWindowKeyHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWindowKeyHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWindowKeyHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWindowKeyHash: %w", err)
+	}
+	return oldValue.WindowKeyHash, nil
+}
+
+// ResetWindowKeyHash resets all changes to the "window_key_hash" field.
+func (m *ChannelFailureEventMutation) ResetWindowKeyHash() {
+	m.window_key_hash = nil
+}
+
+// SetStatusCode sets the "status_code" field.
+func (m *ChannelFailureEventMutation) SetStatusCode(i int) {
+	m.status_code = &i
+	m.addstatus_code = nil
+}
+
+// StatusCode returns the value of the "status_code" field in the mutation.
+func (m *ChannelFailureEventMutation) StatusCode() (r int, exists bool) {
+	v := m.status_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatusCode returns the old "status_code" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldStatusCode(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatusCode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatusCode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatusCode: %w", err)
+	}
+	return oldValue.StatusCode, nil
+}
+
+// AddStatusCode adds i to the "status_code" field.
+func (m *ChannelFailureEventMutation) AddStatusCode(i int) {
+	if m.addstatus_code != nil {
+		*m.addstatus_code += i
+	} else {
+		m.addstatus_code = &i
+	}
+}
+
+// AddedStatusCode returns the value that was added to the "status_code" field in this mutation.
+func (m *ChannelFailureEventMutation) AddedStatusCode() (r int, exists bool) {
+	v := m.addstatus_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetStatusCode resets all changes to the "status_code" field.
+func (m *ChannelFailureEventMutation) ResetStatusCode() {
+	m.status_code = nil
+	m.addstatus_code = nil
+}
+
+// SetErrorDetail sets the "error_detail" field.
+func (m *ChannelFailureEventMutation) SetErrorDetail(s string) {
+	m.error_detail = &s
+}
+
+// ErrorDetail returns the value of the "error_detail" field in the mutation.
+func (m *ChannelFailureEventMutation) ErrorDetail() (r string, exists bool) {
+	v := m.error_detail
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldErrorDetail returns the old "error_detail" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldErrorDetail(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldErrorDetail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldErrorDetail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldErrorDetail: %w", err)
+	}
+	return oldValue.ErrorDetail, nil
+}
+
+// ResetErrorDetail resets all changes to the "error_detail" field.
+func (m *ChannelFailureEventMutation) ResetErrorDetail() {
+	m.error_detail = nil
+}
+
+// SetFailedAt sets the "failed_at" field.
+func (m *ChannelFailureEventMutation) SetFailedAt(t time.Time) {
+	m.failed_at = &t
+}
+
+// FailedAt returns the value of the "failed_at" field in the mutation.
+func (m *ChannelFailureEventMutation) FailedAt() (r time.Time, exists bool) {
+	v := m.failed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFailedAt returns the old "failed_at" field's value of the ChannelFailureEvent entity.
+// If the ChannelFailureEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelFailureEventMutation) OldFailedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFailedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFailedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFailedAt: %w", err)
+	}
+	return oldValue.FailedAt, nil
+}
+
+// ResetFailedAt resets all changes to the "failed_at" field.
+func (m *ChannelFailureEventMutation) ResetFailedAt() {
+	m.failed_at = nil
+}
+
+// Where appends a list predicates to the ChannelFailureEventMutation builder.
+func (m *ChannelFailureEventMutation) Where(ps ...predicate.ChannelFailureEvent) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ChannelFailureEventMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ChannelFailureEventMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ChannelFailureEvent, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ChannelFailureEventMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ChannelFailureEventMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ChannelFailureEvent).
+func (m *ChannelFailureEventMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ChannelFailureEventMutation) Fields() []string {
+	fields := make([]string, 0, 11)
+	if m.created_at != nil {
+		fields = append(fields, channelfailureevent.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, channelfailureevent.FieldUpdatedAt)
+	}
+	if m.channel_id != nil {
+		fields = append(fields, channelfailureevent.FieldChannelID)
+	}
+	if m.model != nil {
+		fields = append(fields, channelfailureevent.FieldModel)
+	}
+	if m.rule_key != nil {
+		fields = append(fields, channelfailureevent.FieldRuleKey)
+	}
+	if m.rule_key_hash != nil {
+		fields = append(fields, channelfailureevent.FieldRuleKeyHash)
+	}
+	if m.window_key != nil {
+		fields = append(fields, channelfailureevent.FieldWindowKey)
+	}
+	if m.window_key_hash != nil {
+		fields = append(fields, channelfailureevent.FieldWindowKeyHash)
+	}
+	if m.status_code != nil {
+		fields = append(fields, channelfailureevent.FieldStatusCode)
+	}
+	if m.error_detail != nil {
+		fields = append(fields, channelfailureevent.FieldErrorDetail)
+	}
+	if m.failed_at != nil {
+		fields = append(fields, channelfailureevent.FieldFailedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ChannelFailureEventMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case channelfailureevent.FieldCreatedAt:
+		return m.CreatedAt()
+	case channelfailureevent.FieldUpdatedAt:
+		return m.UpdatedAt()
+	case channelfailureevent.FieldChannelID:
+		return m.ChannelID()
+	case channelfailureevent.FieldModel:
+		return m.Model()
+	case channelfailureevent.FieldRuleKey:
+		return m.RuleKey()
+	case channelfailureevent.FieldRuleKeyHash:
+		return m.RuleKeyHash()
+	case channelfailureevent.FieldWindowKey:
+		return m.WindowKey()
+	case channelfailureevent.FieldWindowKeyHash:
+		return m.WindowKeyHash()
+	case channelfailureevent.FieldStatusCode:
+		return m.StatusCode()
+	case channelfailureevent.FieldErrorDetail:
+		return m.ErrorDetail()
+	case channelfailureevent.FieldFailedAt:
+		return m.FailedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ChannelFailureEventMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case channelfailureevent.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case channelfailureevent.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	case channelfailureevent.FieldChannelID:
+		return m.OldChannelID(ctx)
+	case channelfailureevent.FieldModel:
+		return m.OldModel(ctx)
+	case channelfailureevent.FieldRuleKey:
+		return m.OldRuleKey(ctx)
+	case channelfailureevent.FieldRuleKeyHash:
+		return m.OldRuleKeyHash(ctx)
+	case channelfailureevent.FieldWindowKey:
+		return m.OldWindowKey(ctx)
+	case channelfailureevent.FieldWindowKeyHash:
+		return m.OldWindowKeyHash(ctx)
+	case channelfailureevent.FieldStatusCode:
+		return m.OldStatusCode(ctx)
+	case channelfailureevent.FieldErrorDetail:
+		return m.OldErrorDetail(ctx)
+	case channelfailureevent.FieldFailedAt:
+		return m.OldFailedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown ChannelFailureEvent field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ChannelFailureEventMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case channelfailureevent.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case channelfailureevent.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	case channelfailureevent.FieldChannelID:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChannelID(v)
+		return nil
+	case channelfailureevent.FieldModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetModel(v)
+		return nil
+	case channelfailureevent.FieldRuleKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuleKey(v)
+		return nil
+	case channelfailureevent.FieldRuleKeyHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuleKeyHash(v)
+		return nil
+	case channelfailureevent.FieldWindowKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWindowKey(v)
+		return nil
+	case channelfailureevent.FieldWindowKeyHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWindowKeyHash(v)
+		return nil
+	case channelfailureevent.FieldStatusCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatusCode(v)
+		return nil
+	case channelfailureevent.FieldErrorDetail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetErrorDetail(v)
+		return nil
+	case channelfailureevent.FieldFailedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFailedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ChannelFailureEvent field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ChannelFailureEventMutation) AddedFields() []string {
+	var fields []string
+	if m.addchannel_id != nil {
+		fields = append(fields, channelfailureevent.FieldChannelID)
+	}
+	if m.addstatus_code != nil {
+		fields = append(fields, channelfailureevent.FieldStatusCode)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ChannelFailureEventMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case channelfailureevent.FieldChannelID:
+		return m.AddedChannelID()
+	case channelfailureevent.FieldStatusCode:
+		return m.AddedStatusCode()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ChannelFailureEventMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case channelfailureevent.FieldChannelID:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddChannelID(v)
+		return nil
+	case channelfailureevent.FieldStatusCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddStatusCode(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ChannelFailureEvent numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ChannelFailureEventMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ChannelFailureEventMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ChannelFailureEventMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown ChannelFailureEvent nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ChannelFailureEventMutation) ResetField(name string) error {
+	switch name {
+	case channelfailureevent.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case channelfailureevent.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	case channelfailureevent.FieldChannelID:
+		m.ResetChannelID()
+		return nil
+	case channelfailureevent.FieldModel:
+		m.ResetModel()
+		return nil
+	case channelfailureevent.FieldRuleKey:
+		m.ResetRuleKey()
+		return nil
+	case channelfailureevent.FieldRuleKeyHash:
+		m.ResetRuleKeyHash()
+		return nil
+	case channelfailureevent.FieldWindowKey:
+		m.ResetWindowKey()
+		return nil
+	case channelfailureevent.FieldWindowKeyHash:
+		m.ResetWindowKeyHash()
+		return nil
+	case channelfailureevent.FieldStatusCode:
+		m.ResetStatusCode()
+		return nil
+	case channelfailureevent.FieldErrorDetail:
+		m.ResetErrorDetail()
+		return nil
+	case channelfailureevent.FieldFailedAt:
+		m.ResetFailedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown ChannelFailureEvent field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ChannelFailureEventMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ChannelFailureEventMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ChannelFailureEventMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ChannelFailureEventMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ChannelFailureEventMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ChannelFailureEventMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ChannelFailureEventMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ChannelFailureEvent unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ChannelFailureEventMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ChannelFailureEvent edge %s", name)
 }
 
 // ChannelModelPriceMutation represents an operation that mutates the ChannelModelPrice nodes in the graph.

@@ -1,3 +1,4 @@
+import { apiKeyAutoDisableRuleFormSchema } from './schema';
 import type {
   APIKeyAutoDisableMode,
   APIKeyAutoDisableRule,
@@ -21,12 +22,27 @@ export type ApiKeyAutoDisableRuleFormValue = {
   disableDurationMinutes?: number | null;
   disableUntilCron?: string | null;
   disableUntilTimezone?: string | null;
+  windowMinutes?: number | null;
+  freezeModel?: boolean | null;
 };
 
 export const RECOMMENDED_GLOBAL_AUTO_DISABLE_RULES: APIKeyAutoDisableRule[] = [
-  { statusCodes: [401], times: 3, action: 'permanent_disable' },
-  { statusCodes: [429], times: 3, action: 'temporary_disable', disableDurationMinutes: 30 },
+  { statusCodes: [401], times: 3, action: 'temporary_disable', disableDurationMinutes: 30, windowMinutes: 10, freezeModel: true },
+  { statusCodes: [429], times: 3, action: 'temporary_disable', disableDurationMinutes: 30, windowMinutes: 10, freezeModel: true },
 ];
+
+// Upgrade only legacy absent/zero timing. Keep other invalid numeric values
+// visible so live form validation can reject them rather than silently clamp.
+function canonicalAutoDisableFields(rule: ApiKeyAutoDisableRuleFormValue) {
+  return {
+    action: 'temporary_disable' as const,
+    disableDurationMinutes: rule.disableDurationMinutes == null || rule.disableDurationMinutes === 0 ? 30 : rule.disableDurationMinutes,
+    disableUntilCron: null,
+    disableUntilTimezone: null,
+    windowMinutes: rule.windowMinutes == null || rule.windowMinutes === 0 ? 10 : rule.windowMinutes,
+    freezeModel: true,
+  };
+}
 
 export function effectiveAutoDisableMode(policies?: AutoDisablePoliciesInput | null): APIKeyAutoDisableMode {
   const mode = policies?.apiKeyAutoDisableMode;
@@ -43,24 +59,20 @@ export function toApiKeyAutoDisableRuleFormValues(rules?: APIKeyAutoDisableRule[
       statusCodes: rule.statusCodes ?? [],
       keywordPatterns: rule.keywordPatterns ?? [],
       times: rule.times,
-      action: rule.action,
-      disableDurationMinutes: rule.action === 'temporary_disable' ? (rule.disableDurationMinutes ?? 30) : null,
-      disableUntilCron: rule.action === 'disable_until_cron' ? (rule.disableUntilCron ?? '0 0 * * *') : null,
-      disableUntilTimezone: rule.action === 'disable_until_cron' ? rule.disableUntilTimezone || 'UTC' : null,
+      ...canonicalAutoDisableFields(rule),
     })) ?? []
   );
 }
 
 export function serializeApiKeyAutoDisableRules(rules: ApiKeyAutoDisableRuleFormValue[]): APIKeyAutoDisableRule[] {
-  return rules.map((rule) => ({
-    statusCodes: rule.statusCodes?.filter((code): code is number => code != null) ?? [],
-    keywordPatterns: rule.keywordPatterns?.map((pattern) => pattern.trim()).filter(Boolean) ?? [],
-    times: rule.times,
-    action: rule.action,
-    disableDurationMinutes: rule.action === 'temporary_disable' ? (rule.disableDurationMinutes ?? null) : null,
-    disableUntilCron: rule.action === 'disable_until_cron' ? rule.disableUntilCron?.trim() || null : null,
-    disableUntilTimezone: rule.action === 'disable_until_cron' ? rule.disableUntilTimezone?.trim() || null : null,
-  }));
+  return rules.map((rule) =>
+    apiKeyAutoDisableRuleFormSchema.parse({
+      statusCodes: rule.statusCodes?.filter((code): code is number => code != null) ?? [],
+      keywordPatterns: rule.keywordPatterns?.map((pattern) => pattern.trim()).filter(Boolean) ?? [],
+      times: rule.times,
+      ...canonicalAutoDisableFields(rule),
+    })
+  );
 }
 
 export function availabilityPoliciesPayload(input: {
@@ -74,7 +86,7 @@ export function availabilityPoliciesPayload(input: {
   emptiedCustom: boolean;
 } {
   let savedMode = input.mode;
-  const serialized = serializeApiKeyAutoDisableRules(input.rules);
+  const serialized = savedMode === 'inherit' ? [] : serializeApiKeyAutoDisableRules(input.rules);
   let emptiedCustom = false;
   if (savedMode === 'custom' && serialized.length === 0) {
     savedMode = 'inherit';

@@ -772,6 +772,8 @@ export interface ModelChannelConnection {
     name: string;
     type: string;
     status: string;
+    tags?: string[];
+    modelCooldowns?: ModelCooldownEntry[];
   };
   keyGroup?: KeyGroupRef | null;
   models: ChannelModelEntry[];

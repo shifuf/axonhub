@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aptible/supercronic/cronexpr"
 	"github.com/samber/lo"
 	"go.uber.org/fx"
 	"golang.org/x/sync/singleflight"
@@ -115,9 +114,8 @@ func NewChannelService(params ChannelServiceParams) *ChannelService {
 		WebhookNotifier:             params.WebhookNotifier,
 		httpClient:                  params.HttpClient,
 		channelPerfMetrics:          make(map[int]*channelMetrics),
-		apiKeyErrorCounts:           make(map[int]map[string]map[int]int),
-		apiKeyRuleActionsInFlight:   make(map[int]map[string]bool),
 		cancellationWindow:          make(map[int]map[string][]time.Time),
+		windowedRuleActionsInFlight: make(map[int]map[string]bool),
 		cancellationActionsInFlight: make(map[int]map[string]bool),
 		perfCh:                      make(chan *PerformanceRecord, 1024),
 	}
@@ -226,15 +224,15 @@ type ChannelService struct {
 	channelPerfMetrics     map[int]*channelMetrics
 	channelPerfMetricsLock sync.RWMutex
 
-	// apiKeyErrorCounts stores consecutive auto-disable counters.
-	// channelID -> counterKey -> dummy status (always 0) -> count
-	apiKeyErrorCounts         map[int]map[string]map[int]int
-	apiKeyRuleActionsInFlight map[int]map[string]bool
 	// cancellationWindow stores client-cancellation timestamps in a sliding
 	// window: channelID -> counterKey -> timestamps. The cooldown triggers when
 	// at least Threshold timestamps fall within the last WindowMinutes.
 	// Deliberately independent from status-code auto-disable counters.
-	cancellationWindow          map[int]map[string][]time.Time
+	cancellationWindow map[int]map[string][]time.Time
+
+	// windowedRuleActionsInFlight claims one channel/model/window action at a
+	// time, including escalation when a sixth failure arrives during a cooldown.
+	windowedRuleActionsInFlight map[int]map[string]bool
 	cancellationActionsInFlight map[int]map[string]bool
 	apiKeyErrorCountsLock       sync.Mutex
 	apiKeyOpsLock               sync.Mutex
@@ -850,67 +848,30 @@ func NormalizeAPIKeyAutoDisableRules(policies *objects.ChannelPolicies) error {
 	return nil
 }
 
-// normalizeAutoDisableRules validates a rule list. Global retry policy uses
-// allowDelete=false so permanent_disable_delete is rejected there.
-func normalizeAutoDisableRules(rules []objects.APIKeyAutoDisableRule, allowDelete bool) ([]objects.APIKeyAutoDisableRule, error) {
+// normalizeAutoDisableRules preserves legacy wire values but stores only safe,
+// temporary channel-model rules. Credential deletion is never an automatic action.
+func normalizeAutoDisableRules(rules []objects.APIKeyAutoDisableRule, _ bool) ([]objects.APIKeyAutoDisableRule, error) {
 	if len(rules) == 0 {
 		return rules, nil
 	}
-
 	normalized := slices.Clone(rules)
 	for i := range normalized {
 		rule := &normalized[i]
+		if rule.WindowMinutes < 0 || rule.WindowMinutes > 7*24*60 {
+			return nil, fmt.Errorf("model cooldown rule %d window must be between 1 and 10080 minutes (0 uses the default)", i+1)
+		}
 		if rule.Times < 1 {
-			return nil, fmt.Errorf("API key rule %d consecutive error count must be at least 1", i+1)
+			return nil, fmt.Errorf("model cooldown rule %d failure count must be at least 1", i+1)
 		}
-
-		// Each action owns one schedule field; the others are cleared so a rule
-		// edited from one action to another cannot leave stale settings behind.
 		switch rule.Action {
-		case objects.APIKeyAutoDisableActionTemporary:
-			if rule.DisableDurationMinutes == nil {
-				return nil, fmt.Errorf("API key rule %d requires a disable duration for temporary disable", i+1)
-			}
-			if *rule.DisableDurationMinutes < 1 {
-				return nil, fmt.Errorf("API key rule %d disable duration must be at least 1 minute", i+1)
-			}
-
-			rule.DisableUntilCron = ""
-			rule.DisableUntilTimezone = ""
-		case objects.APIKeyAutoDisableActionUntilCron:
-			rule.DisableUntilCron = strings.TrimSpace(rule.DisableUntilCron)
-			rule.DisableUntilTimezone = strings.TrimSpace(rule.DisableUntilTimezone)
-
-			if rule.DisableUntilCron == "" {
-				return nil, fmt.Errorf("API key rule %d requires a cron expression for scheduled recovery", i+1)
-			}
-
-			if _, err := cronexpr.Parse(rule.DisableUntilCron); err != nil {
-				return nil, fmt.Errorf("API key rule %d has invalid cron expression %q: %w", i+1, rule.DisableUntilCron, err)
-			}
-
-			if rule.DisableUntilTimezone != "" {
-				if _, err := time.LoadLocation(rule.DisableUntilTimezone); err != nil {
-					return nil, fmt.Errorf("API key rule %d has invalid timezone %q: %w", i+1, rule.DisableUntilTimezone, err)
-				}
-			}
-
-			rule.DisableDurationMinutes = nil
-		case objects.APIKeyAutoDisableActionPermanent:
-			rule.DisableDurationMinutes = nil
-			rule.DisableUntilCron = ""
-			rule.DisableUntilTimezone = ""
-		case objects.APIKeyAutoDisableActionPermanentDelete:
-			if !allowDelete {
-				return nil, fmt.Errorf("API key rule %d cannot use permanent_disable_delete in global auto-disable settings", i+1)
-			}
-			rule.DisableDurationMinutes = nil
-			rule.DisableUntilCron = ""
-			rule.DisableUntilTimezone = ""
+		case "", objects.APIKeyAutoDisableActionTemporary, objects.APIKeyAutoDisableActionPermanent, objects.APIKeyAutoDisableActionPermanentDelete, objects.APIKeyAutoDisableActionUntilCron:
 		default:
-			return nil, fmt.Errorf("API key rule %d has unsupported action %q", i+1, rule.Action)
+			return nil, fmt.Errorf("model cooldown rule %d has unsupported legacy action %q", i+1, rule.Action)
 		}
-
+		if rule.DisableDurationMinutes != nil && *rule.DisableDurationMinutes < 1 {
+			return nil, fmt.Errorf("model cooldown rule %d cooldown duration must be at least 1 minute", i+1)
+		}
+		*rule = effectiveModelFreezeRule(*rule)
 		codes := slices.Clone(rule.StatusCodes)
 		for _, code := range codes {
 			if code < 100 || code > 599 {

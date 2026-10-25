@@ -9,6 +9,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/apikey"
 	"github.com/looplj/axonhub/internal/ent/apikeyprofiletemplate"
 	"github.com/looplj/axonhub/internal/ent/channel"
+	"github.com/looplj/axonhub/internal/ent/channelfailureevent"
 	"github.com/looplj/axonhub/internal/ent/channelmodelprice"
 	"github.com/looplj/axonhub/internal/ent/channelmodelpriceversion"
 	"github.com/looplj/axonhub/internal/ent/channeloverridetemplate"
@@ -210,6 +211,45 @@ func init() {
 	channelDescEndpoints := channelFields[20].Descriptor()
 	// channel.DefaultEndpoints holds the default value on creation for the endpoints field.
 	channel.DefaultEndpoints = channelDescEndpoints.Default.([]objects.ChannelEndpoint)
+	channelfailureeventMixin := schema.ChannelFailureEvent{}.Mixin()
+	channelfailureeventMixinFields0 := channelfailureeventMixin[0].Fields()
+	_ = channelfailureeventMixinFields0
+	channelfailureeventFields := schema.ChannelFailureEvent{}.Fields()
+	_ = channelfailureeventFields
+	// channelfailureeventDescCreatedAt is the schema descriptor for created_at field.
+	channelfailureeventDescCreatedAt := channelfailureeventMixinFields0[0].Descriptor()
+	// channelfailureevent.DefaultCreatedAt holds the default value on creation for the created_at field.
+	channelfailureevent.DefaultCreatedAt = channelfailureeventDescCreatedAt.Default.(func() time.Time)
+	// channelfailureeventDescUpdatedAt is the schema descriptor for updated_at field.
+	channelfailureeventDescUpdatedAt := channelfailureeventMixinFields0[1].Descriptor()
+	// channelfailureevent.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	channelfailureevent.DefaultUpdatedAt = channelfailureeventDescUpdatedAt.Default.(func() time.Time)
+	// channelfailureevent.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	channelfailureevent.UpdateDefaultUpdatedAt = channelfailureeventDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// channelfailureeventDescModel is the schema descriptor for model field.
+	channelfailureeventDescModel := channelfailureeventFields[1].Descriptor()
+	// channelfailureevent.ModelValidator is a validator for the "model" field. It is called by the builders before save.
+	channelfailureevent.ModelValidator = channelfailureeventDescModel.Validators[0].(func(string) error)
+	// channelfailureeventDescRuleKey is the schema descriptor for rule_key field.
+	channelfailureeventDescRuleKey := channelfailureeventFields[2].Descriptor()
+	// channelfailureevent.RuleKeyValidator is a validator for the "rule_key" field. It is called by the builders before save.
+	channelfailureevent.RuleKeyValidator = channelfailureeventDescRuleKey.Validators[0].(func(string) error)
+	// channelfailureeventDescRuleKeyHash is the schema descriptor for rule_key_hash field.
+	channelfailureeventDescRuleKeyHash := channelfailureeventFields[3].Descriptor()
+	// channelfailureevent.RuleKeyHashValidator is a validator for the "rule_key_hash" field. It is called by the builders before save.
+	channelfailureevent.RuleKeyHashValidator = channelfailureeventDescRuleKeyHash.Validators[0].(func(string) error)
+	// channelfailureeventDescWindowKey is the schema descriptor for window_key field.
+	channelfailureeventDescWindowKey := channelfailureeventFields[4].Descriptor()
+	// channelfailureevent.WindowKeyValidator is a validator for the "window_key" field. It is called by the builders before save.
+	channelfailureevent.WindowKeyValidator = channelfailureeventDescWindowKey.Validators[0].(func(string) error)
+	// channelfailureeventDescWindowKeyHash is the schema descriptor for window_key_hash field.
+	channelfailureeventDescWindowKeyHash := channelfailureeventFields[5].Descriptor()
+	// channelfailureevent.WindowKeyHashValidator is a validator for the "window_key_hash" field. It is called by the builders before save.
+	channelfailureevent.WindowKeyHashValidator = channelfailureeventDescWindowKeyHash.Validators[0].(func(string) error)
+	// channelfailureeventDescStatusCode is the schema descriptor for status_code field.
+	channelfailureeventDescStatusCode := channelfailureeventFields[6].Descriptor()
+	// channelfailureevent.DefaultStatusCode holds the default value on creation for the status_code field.
+	channelfailureevent.DefaultStatusCode = channelfailureeventDescStatusCode.Default.(int)
 	channelmodelpriceMixin := schema.ChannelModelPrice{}.Mixin()
 	channelmodelprice.Policy = privacy.NewPolicies(schema.ChannelModelPrice{})
 	channelmodelprice.Hooks[0] = func(next ent.Mutator) ent.Mutator {

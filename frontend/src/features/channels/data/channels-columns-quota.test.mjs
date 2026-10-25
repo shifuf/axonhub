@@ -41,7 +41,7 @@ const { parseQuotaLimits } = await loadModule('features/system/data/quotas.ts', 
 
 const { channelSchema } = await loadModule('features/channels/data/schema.ts', (s) => s.replace(/z\.url\(/g, 'z.string().url('));
 
-const channelQuerySource = read('features/channels/data/channels.ts').replace(/^import(?:.|\n)*?;\n/gm, '');
+const channelQuerySource = read('features/channels/data/channels.ts').replace(/^import[\s\S]*?;\r?\n/gm, '');
 const channelQueryTranspiled = ts.transpileModule(channelQuerySource, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2023 },
 }).outputText;

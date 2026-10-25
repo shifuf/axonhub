@@ -251,6 +251,8 @@ type APIKeyAutoDisableRule {
   disableDurationMinutes: Int
   disableUntilCron: String
   disableUntilTimezone: String
+  windowMinutes: Int
+  freezeModel: Boolean
 }
 
 input APIKeyAutoDisableRuleInput {
@@ -261,6 +263,8 @@ input APIKeyAutoDisableRuleInput {
   disableDurationMinutes: Int
   disableUntilCron: String
   disableUntilTimezone: String
+  windowMinutes: Int
+  freezeModel: Boolean
 }
 
 type ChannelPolicies {

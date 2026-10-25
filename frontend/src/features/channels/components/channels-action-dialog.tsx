@@ -330,11 +330,78 @@ function getInitialBaseURL(row: Pick<Channel, 'type' | 'baseURL' | 'credentials'
 
 // Used by both the submit path and fetch-models: reads the access_token out of
 // an OAuth/auth.json credential, falling back to the raw string.
+function parseOauthToken(oauthApiKey: string): string {
+  if (!oauthApiKey) return '';
+  try {
+    const parsed = JSON.parse(oauthApiKey);
+    if (parsed.access_token) {
+      return parsed.access_token;
+    }
+    if (parsed.tokens?.access_token) {
+      return parsed.tokens.access_token;
+    }
+  } catch {
+    // Not JSON, use as-is
+  }
+  return oauthApiKey;
+}
 
 // A third-party Codex channel authenticates with a plain API key only. An OAuth
 // or auth.json row that is copied/edited into third-party mode still carries its
 // old JSON in `credentials.apiKey`; the backend replaces credentials wholesale,
 // so the inherited value must be dropped before submit or it silently revives.
+function getCodexThirdPartySubmitCredentials<T extends { apiKey?: string | null; apiKeys?: string[] | null }>(
+  credentials: T,
+  channel: { type?: ChannelType | null; authMode: string }
+): T {
+  if (channel.type !== 'codex' || channel.authMode !== 'third-party') return credentials;
+
+  const { apiKey: _inheritedOAuthCredentials, ...thirdPartyCredentials } = credentials;
+  return thirdPartyCredentials as T;
+}
+
+// Model fetch mirrors submit: third-party Codex uses only the plain key, every
+// other provider keeps preferring an OAuth credential when one is present.
+function getFetchModelsApiKey(input: {
+  type?: string | null;
+  authMode: string;
+  oauthApiKey?: string | null;
+  apiKeys?: (string | null | undefined)[] | null;
+}): string {
+  const plainApiKey = (input.apiKeys || []).find((key) => (key || '').trim().length > 0)?.trim() || '';
+  const oauthApiKey = input.oauthApiKey || '';
+
+  if (input.type === 'codex' && input.authMode === 'third-party') {
+    return plainApiKey;
+  }
+
+  // OAuth JSON is sent whole so the backend can detect isOAuthJSON.
+  if (oauthApiKey.trimStart().startsWith('{')) {
+    return oauthApiKey;
+  }
+
+  return parseOauthToken(oauthApiKey) || plainApiKey;
+}
+
+// Third-party Codex rejects an empty or OAuth-shaped credential so a save can
+// never persist a channel that still authenticates with the inherited JSON.
+function getCodexThirdPartyCredentialError(channel: {
+  type?: string | null;
+  authMode: string;
+  apiKeys?: (string | null | undefined)[] | null;
+}): string | undefined {
+  if (channel.type !== 'codex' || channel.authMode !== 'third-party') return undefined;
+
+  const apiKeys = (channel.apiKeys || []).map((key) => (key || '').trim()).filter((key) => key.length > 0);
+  if (apiKeys.length === 0) {
+    return 'channels.dialogs.oauth.errors.codexThirdPartyApiKeyRequired';
+  }
+  if (apiKeys.some((key) => key.startsWith('{'))) {
+    return 'channels.dialogs.oauth.errors.codexThirdPartyApiKeyInvalid';
+  }
+
+  return undefined;
+}
 // One group in the grouped-key editor. A group is a required remark (name) plus
 // one or more keys: several keys rotate round-robin inside the group.
 type KeyGroupFormRow = {
@@ -1530,6 +1597,29 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
             type: derivedChannelType,
           };
 
+      // A third-party Codex channel authenticates with a plain API key: reject an
+      // empty or inherited OAuth-shaped credential instead of saving it. Grouped
+      // keys count too, because the grouped editor is where third-party keys live.
+      const codexThirdPartyCredentialError = getCodexThirdPartyCredentialError({
+        type: valuesForSubmit.type,
+        authMode,
+        apiKeys: [
+          ...(values.credentials?.apiKeys || []),
+          ...(values.credentials?.keyGroups || []).flatMap((group) => group.apiKeys || []),
+        ],
+      });
+      if (codexThirdPartyCredentialError) {
+        form.setError('credentials.apiKeys', {
+          type: 'manual',
+          message: t(codexThirdPartyCredentialError),
+        });
+        form.setError('credentials.keyGroups', {
+          type: 'manual',
+          message: t(codexThirdPartyCredentialError),
+        });
+        return;
+      }
+
       // Vertex credentials are project-bound triples and are the only credential for
       // that channel type: a leftover singular apiKey would still be selected at
       // runtime and would not resolve to a project/region pair. Ordinary channels keep
@@ -1556,7 +1646,12 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         ...valuesForSubmit,
         supportedModels,
         manualModels,
-        credentials,
+        credentials: credentials
+          ? getCodexThirdPartySubmitCredentials(credentials, {
+              type: valuesForSubmit.type,
+              authMode,
+            })
+          : credentials,
       };
       // The Command Code / Ollama quota cookie is a browser-session credential
       // that only belongs on its own channel type. Never let a
@@ -1810,7 +1905,11 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       const group = form.getValues(`credentials.keyGroups.${index}`);
       // Probe with the group's first key: every key of a group reaches the same
       // upstream, so the first one is representative.
-      const apiKey = (group?.apiKeys || []).find((key) => (key || '').trim())?.trim() || '';
+      const apiKey = getFetchModelsApiKey({
+        type: channelType,
+        authMode,
+        apiKeys: group?.apiKeys,
+      });
 
       if (!channelType || !baseURL) {
         return;
@@ -1895,7 +1994,11 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     // Sequential so a failing upstream cannot drown the others in parallel errors.
     for (const { group, index } of usable) {
-      const apiKey = (group.apiKeys || []).find((key) => (key || '').trim())?.trim() || '';
+      const apiKey = getFetchModelsApiKey({
+        type: channelType,
+        authMode,
+        apiKeys: group.apiKeys,
+      });
 
       try {
         const result = await fetchModels.mutateAsync({

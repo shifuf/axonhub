@@ -126,9 +126,11 @@ type ComplexityRoot struct {
 		DisableDurationMinutes func(childComplexity int) int
 		DisableUntilCron       func(childComplexity int) int
 		DisableUntilTimezone   func(childComplexity int) int
+		FreezeModel            func(childComplexity int) int
 		KeywordPatterns        func(childComplexity int) int
 		StatusCodes            func(childComplexity int) int
 		Times                  func(childComplexity int) int
+		WindowMinutes          func(childComplexity int) int
 	}
 
 	APIKeyConnection struct {
@@ -304,8 +306,9 @@ type ComplexityRoot struct {
 	}
 
 	AutoDisableChannel struct {
-		Enabled func(childComplexity int) int
-		Rules   func(childComplexity int) int
+		Enabled                   func(childComplexity int) int
+		PermanentFailureThreshold func(childComplexity int) int
+		Rules                     func(childComplexity int) int
 	}
 
 	AutoDisableChannelOnboarding struct {
@@ -2821,6 +2824,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.APIKeyAutoDisableRule.DisableUntilTimezone(childComplexity), true
+	case "APIKeyAutoDisableRule.freezeModel":
+		if e.complexity.APIKeyAutoDisableRule.FreezeModel == nil {
+			break
+		}
+
+		return e.complexity.APIKeyAutoDisableRule.FreezeModel(childComplexity), true
 	case "APIKeyAutoDisableRule.keywordPatterns":
 		if e.complexity.APIKeyAutoDisableRule.KeywordPatterns == nil {
 			break
@@ -2839,6 +2848,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.APIKeyAutoDisableRule.Times(childComplexity), true
+	case "APIKeyAutoDisableRule.windowMinutes":
+		if e.complexity.APIKeyAutoDisableRule.WindowMinutes == nil {
+			break
+		}
+
+		return e.complexity.APIKeyAutoDisableRule.WindowMinutes(childComplexity), true
 
 	case "APIKeyConnection.edges":
 		if e.complexity.APIKeyConnection.Edges == nil {
@@ -3487,6 +3502,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.AutoDisableChannel.Enabled(childComplexity), true
+	case "AutoDisableChannel.permanentFailureThreshold":
+		if e.complexity.AutoDisableChannel.PermanentFailureThreshold == nil {
+			break
+		}
+
+		return e.complexity.AutoDisableChannel.PermanentFailureThreshold(childComplexity), true
 	case "AutoDisableChannel.rules":
 		if e.complexity.AutoDisableChannel.Rules == nil {
 			break
@@ -16999,6 +17020,64 @@ func (ec *executionContext) fieldContext_APIKeyAutoDisableRule_disableUntilTimez
 	return fc, nil
 }
 
+func (ec *executionContext) _APIKeyAutoDisableRule_windowMinutes(ctx context.Context, field graphql.CollectedField, obj *objects.APIKeyAutoDisableRule) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyAutoDisableRule_windowMinutes,
+		func(ctx context.Context) (any, error) {
+			return obj.WindowMinutes, nil
+		},
+		nil,
+		ec.marshalOInt2int,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyAutoDisableRule_windowMinutes(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyAutoDisableRule",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _APIKeyAutoDisableRule_freezeModel(ctx context.Context, field graphql.CollectedField, obj *objects.APIKeyAutoDisableRule) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_APIKeyAutoDisableRule_freezeModel,
+		func(ctx context.Context) (any, error) {
+			return obj.FreezeModel, nil
+		},
+		nil,
+		ec.marshalOBoolean2bool,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_APIKeyAutoDisableRule_freezeModel(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "APIKeyAutoDisableRule",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _APIKeyConnection_edges(ctx context.Context, field graphql.CollectedField, obj *ent.APIKeyConnection) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -20365,8 +20444,41 @@ func (ec *executionContext) fieldContext_AutoDisableChannel_rules(_ context.Cont
 				return ec.fieldContext_APIKeyAutoDisableRule_disableUntilCron(ctx, field)
 			case "disableUntilTimezone":
 				return ec.fieldContext_APIKeyAutoDisableRule_disableUntilTimezone(ctx, field)
+			case "windowMinutes":
+				return ec.fieldContext_APIKeyAutoDisableRule_windowMinutes(ctx, field)
+			case "freezeModel":
+				return ec.fieldContext_APIKeyAutoDisableRule_freezeModel(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type APIKeyAutoDisableRule", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _AutoDisableChannel_permanentFailureThreshold(ctx context.Context, field graphql.CollectedField, obj *biz.AutoDisableChannel) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_AutoDisableChannel_permanentFailureThreshold,
+		func(ctx context.Context) (any, error) {
+			return obj.PermanentFailureThreshold, nil
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_AutoDisableChannel_permanentFailureThreshold(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "AutoDisableChannel",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
 		},
 	}
 	return fc, nil
@@ -25233,6 +25345,10 @@ func (ec *executionContext) fieldContext_ChannelPolicies_apiKeyAutoDisableRules(
 				return ec.fieldContext_APIKeyAutoDisableRule_disableUntilCron(ctx, field)
 			case "disableUntilTimezone":
 				return ec.fieldContext_APIKeyAutoDisableRule_disableUntilTimezone(ctx, field)
+			case "windowMinutes":
+				return ec.fieldContext_APIKeyAutoDisableRule_windowMinutes(ctx, field)
+			case "freezeModel":
+				return ec.fieldContext_APIKeyAutoDisableRule_freezeModel(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type APIKeyAutoDisableRule", field.Name)
 		},
@@ -35143,6 +35259,8 @@ func (ec *executionContext) fieldContext_Mutation_updateChannelSettings(ctx cont
 				return ec.fieldContext_Channel_autoDisabledAt(ctx, field)
 			case "autoDisableExpiresAt":
 				return ec.fieldContext_Channel_autoDisableExpiresAt(ctx, field)
+			case "modelCooldowns":
+				return ec.fieldContext_Channel_modelCooldowns(ctx, field)
 			case "remark":
 				return ec.fieldContext_Channel_remark(ctx, field)
 			case "endpoints":
@@ -54882,6 +55000,8 @@ func (ec *executionContext) fieldContext_RetryPolicy_autoDisableChannel(_ contex
 				return ec.fieldContext_AutoDisableChannel_enabled(ctx, field)
 			case "rules":
 				return ec.fieldContext_AutoDisableChannel_rules(ctx, field)
+			case "permanentFailureThreshold":
+				return ec.fieldContext_AutoDisableChannel_permanentFailureThreshold(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type AutoDisableChannel", field.Name)
 		},
@@ -67477,7 +67597,7 @@ func (ec *executionContext) unmarshalInputAPIKeyAutoDisableRuleInput(ctx context
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"statusCodes", "keywordPatterns", "times", "action", "disableDurationMinutes", "disableUntilCron", "disableUntilTimezone"}
+	fieldsInOrder := [...]string{"statusCodes", "keywordPatterns", "times", "action", "disableDurationMinutes", "disableUntilCron", "disableUntilTimezone", "windowMinutes", "freezeModel"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -67533,6 +67653,20 @@ func (ec *executionContext) unmarshalInputAPIKeyAutoDisableRuleInput(ctx context
 				return it, err
 			}
 			it.DisableUntilTimezone = data
+		case "windowMinutes":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("windowMinutes"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.WindowMinutes = data
+		case "freezeModel":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("freezeModel"))
+			data, err := ec.unmarshalOBoolean2bool(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.FreezeModel = data
 		}
 	}
 
@@ -69179,7 +69313,7 @@ func (ec *executionContext) unmarshalInputAutoDisableChannelInput(ctx context.Co
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"enabled", "rules"}
+	fieldsInOrder := [...]string{"enabled", "rules", "permanentFailureThreshold"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -69200,6 +69334,13 @@ func (ec *executionContext) unmarshalInputAutoDisableChannelInput(ctx context.Co
 				return it, err
 			}
 			it.Rules = data
+		case "permanentFailureThreshold":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("permanentFailureThreshold"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.PermanentFailureThreshold = data
 		}
 	}
 
@@ -95434,6 +95575,10 @@ func (ec *executionContext) _APIKeyAutoDisableRule(ctx context.Context, sel ast.
 			out.Values[i] = ec._APIKeyAutoDisableRule_disableUntilCron(ctx, field, obj)
 		case "disableUntilTimezone":
 			out.Values[i] = ec._APIKeyAutoDisableRule_disableUntilTimezone(ctx, field, obj)
+		case "windowMinutes":
+			out.Values[i] = ec._APIKeyAutoDisableRule_windowMinutes(ctx, field, obj)
+		case "freezeModel":
+			out.Values[i] = ec._APIKeyAutoDisableRule_freezeModel(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -96812,6 +96957,11 @@ func (ec *executionContext) _AutoDisableChannel(ctx context.Context, sel ast.Sel
 			}
 		case "rules":
 			out.Values[i] = ec._AutoDisableChannel_rules(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "permanentFailureThreshold":
+			out.Values[i] = ec._AutoDisableChannel_permanentFailureThreshold(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

@@ -1,10 +1,7 @@
 import { useEffect, useState } from 'react';
-import { formatDistanceToNow } from 'date-fns';
 import { IconSnowflake, IconSnowflakeOff } from '@tabler/icons-react';
-import { enUS, zhCN } from 'date-fns/locale';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -17,21 +14,15 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useChannels } from '../context/channels-context';
 import { useChannelModelCooldowns, useClearChannelModelCooldown } from '../data/channels';
+import { CooldownDetails } from './cooldown-details';
 
 interface ChannelsModelCooldownsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-function formatRemaining(expiresAt: string, language: string): string {
-  return formatDistanceToNow(new Date(expiresAt), {
-    addSuffix: false,
-    locale: language.startsWith('zh') ? zhCN : enUS,
-  });
-}
-
 export function ChannelsModelCooldownsDialog({ open, onOpenChange }: ChannelsModelCooldownsDialogProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { currentRow, setOpen } = useChannels();
   const [confirmModel, setConfirmModel] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -60,7 +51,7 @@ export function ChannelsModelCooldownsDialog({ open, onOpenChange }: ChannelsMod
   const handleClear = async (model: string) => {
     if (!currentRow) return;
     try {
-      await clearCooldown.mutateAsync({ channelID: currentRow.id, model });
+      if (!(await clearCooldown.mutateAsync({ channelID: currentRow.id, model }))) return;
       setConfirmModel(null);
       toast.success(t('channels.dialogs.modelCooldowns.messages.cleared'));
     } catch {
@@ -91,26 +82,13 @@ export function ChannelsModelCooldownsDialog({ open, onOpenChange }: ChannelsMod
               </p>
             ) : (
               cooldowns.map((cooldown) => (
-                <div key={cooldown.model} className='rounded-lg border p-3'>
+                <div key={cooldown.model} className='rounded-lg border p-3' data-testid='channel-model-cooldown'>
                   <div className='flex items-start justify-between gap-3'>
                     <div className='min-w-0 space-y-1'>
                       <div className='flex flex-wrap items-center gap-1.5'>
                         <span className='truncate text-sm font-medium'>{cooldown.model}</span>
-                        {cooldown.expiresAt && new Date(cooldown.expiresAt).getTime() > now ? (
-                          <Badge variant='outline' className='h-5 px-1.5 text-[10px] font-normal text-cyan-600 dark:text-cyan-400'>
-                            {t('channels.dialogs.modelCooldowns.remaining', {
-                              duration: formatRemaining(cooldown.expiresAt, i18n.language),
-                            })}
-                          </Badge>
-                        ) : (
-                          <Badge variant='outline' className='h-5 px-1.5 text-[10px] font-normal'>
-                            {t('channels.dialogs.modelCooldowns.expired')}
-                          </Badge>
-                        )}
                       </div>
-                      {cooldown.reason && (
-                        <p className='text-muted-foreground line-clamp-2 text-xs'>{cooldown.reason}</p>
-                      )}
+                      <CooldownDetails {...cooldown} now={now} />
                     </div>
                     <Button
                       size='sm'

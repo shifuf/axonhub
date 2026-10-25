@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -11,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+import { areApiKeyAutoDisableRulesValid } from '@/features/channels/data/schema';
 import { ApiKeyAutoDisableRulesEditor } from '@/features/channels/components/api-key-auto-disable-rules-editor';
 import {
   type ApiKeyAutoDisableRuleFormValue,
@@ -29,13 +31,26 @@ import {
 import {
   useRetryPolicy,
   useUpdateRetryPolicy,
-  type ClientCancellationAction,
   type ClientCancellationPolicyInput,
   type ClientCancellationScope,
   type RetryPolicyInput,
 } from '../data/system';
 
 const CLIENT_CANCELLATION_COOLDOWN_PRESETS = [5, 10, 20, 30, 60] as const;
+
+// Mirrors the backend safeguard default: AutoDisableChannel.PermanentFailureThreshold
+// falls back to 6 (range 1-1000, enforced again on submit and server-side).
+const DEFAULT_PERMANENT_FAILURE_THRESHOLD = 6;
+
+// Keep cancellation evidence gates, scope and project overrides intact. This is
+// deliberately separate from error rules and their permanent model-freeze safeguard.
+function modelOnlyClientCancellationPolicy(policy?: ClientCancellationPolicyInput): ClientCancellationPolicyInput {
+  return {
+    ...policy,
+    action: 'cooldown_model',
+    projectOverrides: policy?.projectOverrides?.map((override) => ({ ...override, action: 'cooldown_model' })),
+  };
+}
 
 function ClientCancellationTimingFields({
   idPrefix,
@@ -44,7 +59,7 @@ function ClientCancellationTimingFields({
 }: {
   idPrefix: string;
   policy: ClientCancellationPolicyInput;
-  onChange: (field: 'threshold' | 'windowMinutes' | 'cooldownMinutes' | 'action', value: number | ClientCancellationAction) => void;
+  onChange: (field: 'threshold' | 'windowMinutes' | 'cooldownMinutes', value: number) => void;
 }) {
   const { t } = useTranslation();
   const cooldownMinutes = policy.cooldownMinutes ?? 30;
@@ -100,16 +115,9 @@ function ClientCancellationTimingFields({
       <div className='space-y-2'>
         <Label htmlFor={`${idPrefix}-action`}>{t('system.retry.clientCancellation.action.label')}</Label>
         <div className='text-muted-foreground text-sm'>{t('system.retry.clientCancellation.action.description')}</div>
-        <Select value={policy.action || 'switch_and_cooldown'} onValueChange={(value) => onChange('action', value as ClientCancellationAction)}>
-          <SelectTrigger id={`${idPrefix}-action`} className='w-full'>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value='switch_and_cooldown'>{t('system.retry.clientCancellation.action.options.switchAndCooldown')}</SelectItem>
-            <SelectItem value='cooldown_only'>{t('system.retry.clientCancellation.action.options.cooldownOnly')}</SelectItem>
-            <SelectItem value='cooldown_model'>{t('system.retry.clientCancellation.action.options.cooldownModel')}</SelectItem>
-          </SelectContent>
-        </Select>
+        <div id={`${idPrefix}-action`} data-testid='client-cancellation-model-action' className='rounded-md border px-3 py-2 text-sm'>
+          {t('system.retry.clientCancellation.action.options.cooldownModel')}
+        </div>
       </div>
 
       <div className='space-y-2'>
@@ -191,12 +199,14 @@ export function RetrySettings() {
     autoDisableChannel: {
       enabled: false,
       rules: [],
+      permanentFailureThreshold: DEFAULT_PERMANENT_FAILURE_THRESHOLD,
     },
     clientCancellationPolicy: {
       enabled: true,
       threshold: 2,
+      windowMinutes: 10,
       cooldownMinutes: 30,
-      action: 'switch_and_cooldown',
+      action: 'cooldown_model',
       scope: 'global',
       projectOverrides: [],
     },
@@ -221,16 +231,18 @@ export function RetrySettings() {
         autoDisableChannel: {
           enabled: retryPolicy.autoDisableChannel?.enabled || false,
           rules: toApiKeyAutoDisableRuleFormValues(retryPolicy.autoDisableChannel?.rules),
+          permanentFailureThreshold:
+            retryPolicy.autoDisableChannel?.permanentFailureThreshold ?? DEFAULT_PERMANENT_FAILURE_THRESHOLD,
         },
-        clientCancellationPolicy: {
+        clientCancellationPolicy: modelOnlyClientCancellationPolicy({
+          ...retryPolicy.clientCancellationPolicy,
           enabled: retryPolicy.clientCancellationPolicy?.enabled ?? true,
           threshold: retryPolicy.clientCancellationPolicy?.threshold ?? 2,
           windowMinutes: retryPolicy.clientCancellationPolicy?.windowMinutes ?? 10,
           cooldownMinutes: retryPolicy.clientCancellationPolicy?.cooldownMinutes ?? 30,
-          action: retryPolicy.clientCancellationPolicy?.action ?? 'switch_and_cooldown',
           scope: retryPolicy.clientCancellationPolicy?.scope ?? 'global',
           projectOverrides: retryPolicy.clientCancellationPolicy?.projectOverrides ?? [],
-        },
+        }),
       });
     }
   }, [retryPolicy]);
@@ -258,15 +270,18 @@ export function RetrySettings() {
     }));
   }, []);
 
-  const handleAutoDisableChannelChange = useCallback((field: 'enabled', value: boolean) => {
-    setFormData((prev) => ({
-      ...prev,
-      autoDisableChannel: {
-        ...prev.autoDisableChannel,
-        [field]: value,
-      },
-    }));
-  }, []);
+  const handleAutoDisableChannelChange = useCallback(
+    (field: 'enabled' | 'permanentFailureThreshold', value: boolean | number) => {
+      setFormData((prev) => ({
+        ...prev,
+        autoDisableChannel: {
+          ...prev.autoDisableChannel,
+          [field]: value,
+        },
+      }));
+    },
+    []
+  );
 
   const handleAutoDisableRulesChange = useCallback((rules: ApiKeyAutoDisableRuleFormValue[]) => {
     setFormData((prev) => {
@@ -294,7 +309,7 @@ export function RetrySettings() {
   }, []);
 
   const handleClientCancellationChange = useCallback(
-    (field: 'enabled' | 'threshold' | 'cooldownMinutes' | 'action' | 'scope', value: boolean | number | string) => {
+    (field: 'enabled' | 'threshold' | 'windowMinutes' | 'cooldownMinutes' | 'scope', value: boolean | number | string) => {
       setFormData((prev) => ({
         ...prev,
         clientCancellationPolicy: {
@@ -343,7 +358,7 @@ export function RetrySettings() {
                 threshold: policy?.threshold ?? 2,
                 windowMinutes: policy?.windowMinutes ?? 10,
                 cooldownMinutes: policy?.cooldownMinutes ?? 30,
-                action: policy?.action ?? 'switch_and_cooldown',
+                action: 'cooldown_model',
               },
             ],
           },
@@ -354,7 +369,7 @@ export function RetrySettings() {
   );
 
   const handleProjectCancellationChange = useCallback(
-    (field: 'threshold' | 'windowMinutes' | 'cooldownMinutes' | 'action', value: number | ClientCancellationAction) => {
+    (field: 'threshold' | 'windowMinutes' | 'cooldownMinutes', value: number) => {
       if (!cancellationProjectID) return;
       setFormData((prev) => {
         const policy = prev.clientCancellationPolicy;
@@ -375,15 +390,23 @@ export function RetrySettings() {
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      if (!areApiKeyAutoDisableRulesValid(formData.autoDisableChannel?.rules ?? [])) {
+        toast.error(t('channels.dialogs.apiKeyRules.validation.invalidRules'));
+        return;
+      }
       await updateRetryPolicy.mutateAsync({
         ...formData,
+        clientCancellationPolicy: modelOnlyClientCancellationPolicy(formData.clientCancellationPolicy),
         autoDisableChannel: {
           enabled: formData.autoDisableChannel?.enabled || false,
-          rules: serializeApiKeyAutoDisableRules(toApiKeyAutoDisableRuleFormValues(formData.autoDisableChannel?.rules)),
+          rules: serializeApiKeyAutoDisableRules(formData.autoDisableChannel?.rules ?? []),
+          // Inline clamp: the submit path must stay dependency-free for the unit
+          // harness. 0/missing falls back to the backend default of 6; cap at 1000.
+          permanentFailureThreshold: Math.min(1000, Math.max(1, Number(formData.autoDisableChannel?.permanentFailureThreshold) || 6)),
         },
       });
     },
-    [updateRetryPolicy, formData]
+    [updateRetryPolicy, formData, t]
   );
 
   if (isLoading) {
@@ -624,6 +647,28 @@ export function RetrySettings() {
 
                 <p className='text-muted-foreground text-sm'>{t('system.retry.autoDisableChannel.noDeleteCredential')}</p>
 
+                {formData.autoDisableChannel?.enabled && (
+                  <div className='space-y-2'>
+                    <Label htmlFor='auto-disable-permanent-threshold'>
+                      {t('system.retry.autoDisableChannel.permanentThreshold.label')}
+                    </Label>
+                    <div className='text-muted-foreground text-sm'>
+                      {t('system.retry.autoDisableChannel.permanentThreshold.description')}
+                    </div>
+                    <Input
+                      id='auto-disable-permanent-threshold'
+                      type='number'
+                      min={1}
+                      max={1000}
+                      className='w-32'
+                      value={formData.autoDisableChannel?.permanentFailureThreshold ?? DEFAULT_PERMANENT_FAILURE_THRESHOLD}
+                      onChange={(e) =>
+                        handleAutoDisableChannelChange('permanentFailureThreshold', parseInt(e.target.value, 10) || 0)
+                      }
+                    />
+                  </div>
+                )}
+
                 {(formData.autoDisableChannel?.rules?.length ?? 0) === 0 && (
                   <Button type='button' variant='outline' size='sm' onClick={insertRecommendedAutoDisableRules}>
                     {t('system.retry.autoDisableChannel.recommendedRules')}
@@ -633,7 +678,6 @@ export function RetrySettings() {
                 <ApiKeyAutoDisableRulesEditor
                   rules={(formData.autoDisableChannel?.rules ?? []) as ApiKeyAutoDisableRuleFormValue[]}
                   onChange={handleAutoDisableRulesChange}
-                  allowDelete={false}
                 />
               </div>
             </div>
@@ -740,7 +784,11 @@ export function RetrySettings() {
 
           {/* Submit Button */}
           <div className='flex justify-end'>
-            <Button type='submit' disabled={updateRetryPolicy.isPending} className='min-w-24'>
+            <Button
+              type='submit'
+              disabled={updateRetryPolicy.isPending || !areApiKeyAutoDisableRulesValid(formData.autoDisableChannel?.rules ?? [])}
+              className='min-w-24'
+            >
               {updateRetryPolicy.isPending ? <Loader2 className='h-4 w-4 animate-spin' /> : t('common.buttons.save')}
             </Button>
           </div>

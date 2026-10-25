@@ -90,9 +90,13 @@ var defaultRetryPolicy = RetryPolicy{
 		Enabled:          true,
 		Threshold:        2,
 		CooldownMinutes:  30,
-		Action:           ClientCancellationActionSwitchAndCooldown,
+		WindowMinutes:    defaultClientCancellationWindowMinutes,
+		Action:           ClientCancellationActionCooldownModel,
 		Scope:            ClientCancellationScopeGlobal,
 		ProjectOverrides: []ClientCancellationProjectPolicy{},
+	},
+	AutoDisableChannel: AutoDisableChannel{
+		PermanentFailureThreshold: defaultPermanentModelFailureThreshold,
 	},
 }
 

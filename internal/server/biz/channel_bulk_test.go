@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/internal/authz"
@@ -813,7 +814,7 @@ func TestChannelService_BulkUpdateChannelAutoDisable_OffKeepsRules(t *testing.T)
 	require.Equal(t, objects.CapabilityPolicyForbid, got.Policies.Stream)
 }
 
-func TestChannelService_BulkUpdateChannelAutoDisable_InvalidCronRollsBack(t *testing.T) {
+func TestChannelService_BulkUpdateChannelAutoDisable_InvalidWindowRollsBack(t *testing.T) {
 	svc, client := setupTestChannelService(t)
 	defer client.Close()
 
@@ -828,14 +829,15 @@ func TestChannelService_BulkUpdateChannelAutoDisable_InvalidCronRollsBack(t *tes
 		ChannelIDs: []int{ch1.ID, ch2.ID},
 		Action:     BulkAutoDisableActionWriteRules,
 		Rules: []objects.APIKeyAutoDisableRule{{
-			StatusCodes:      []int{429},
-			Times:            1,
-			Action:           objects.APIKeyAutoDisableActionUntilCron,
-			DisableUntilCron: "not-a-cron",
+			StatusCodes:            []int{429},
+			Times:                  1,
+			Action:                 objects.APIKeyAutoDisableActionTemporary,
+			DisableDurationMinutes: lo.ToPtr(5),
+			WindowMinutes:          -1,
 		}},
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid cron")
+	require.Contains(t, err.Error(), "window")
 
 	got1, err := client.Channel.Get(ctx, ch1.ID)
 	require.NoError(t, err)

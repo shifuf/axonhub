@@ -126,32 +126,9 @@ func TestChannelService_OAuthCredentialDisableAndCronRecovery(t *testing.T) {
 	svc := newTestChannelService(client)
 
 	ch := createTestOAuthChannel(t, client, ctx, "codex-oauth")
-	ch, err := client.Channel.UpdateOneID(ch.ID).
-		SetPolicies(objects.ChannelPolicies{APIKeyAutoDisableRules: []objects.APIKeyAutoDisableRule{
-			{
-				StatusCodes:      []int{429},
-				Times:            2,
-				Action:           objects.APIKeyAutoDisableActionUntilCron,
-				DisableUntilCron: "0 0 * * *",
-			},
-		}}).
-		Save(ctx)
+	expiresAt, err := nextAPIKeyRuleCronOccurrence(objects.APIKeyAutoDisableRule{DisableUntilCron: "0 0 * * *"}, time.Now())
 	require.NoError(t, err)
-	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
-
-	perf := &PerformanceRecord{
-		ChannelID:          ch.ID,
-		APIKey:             objects.OAuthCredentialRef,
-		ResponseStatusCode: 429,
-	}
-
-	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
-	require.True(t, matched)
-	require.False(t, acted, "threshold of 2 must not fire on the first failure")
-
-	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
-	require.True(t, matched)
-	require.True(t, acted)
+	require.NoError(t, svc.DisableAPIKey(ctx, ch.ID, objects.OAuthCredentialRef, 429, "Manual scheduled credential disable", &expiresAt))
 
 	disabled, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
@@ -194,11 +171,9 @@ func TestChannelService_OAuthCredentialDisableAndCronRecovery(t *testing.T) {
 	require.Nil(t, recovered.AutoDisabledAt)
 }
 
-// permanent_disable_delete has nothing to delete on an OAuth channel, and
-// DeleteDisabledAPIKeys rejects OAuth channels outright. The rule must therefore
-// degrade to a plain permanent disable and still report success, rather than
-// failing and retrying forever, and must leave the real credentials untouched.
-func TestChannelService_OAuthPermanentRuleDegradesToDisable(t *testing.T) {
+// Legacy delete rules now freeze only the request model, including OAuth channels.
+// Neither the sentinel nor the underlying OAuth credential may be disabled or deleted.
+func TestChannelService_OAuthLegacyDeleteRuleOnlyFreezesModel(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -220,6 +195,7 @@ func TestChannelService_OAuthPermanentRuleDegradesToDisable(t *testing.T) {
 
 	_, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
 		ChannelID:          ch.ID,
+		Model:              "gpt-5",
 		APIKey:             objects.OAuthCredentialRef,
 		ResponseStatusCode: 401,
 	})
@@ -227,10 +203,8 @@ func TestChannelService_OAuthPermanentRuleDegradesToDisable(t *testing.T) {
 
 	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.DisabledAPIKeys, 1)
-	require.Equal(t, objects.OAuthCredentialRef, updated.DisabledAPIKeys[0].Key)
-	require.Nil(t, updated.DisabledAPIKeys[0].ExpiresAt, "permanent disable must never expire")
-	require.Equal(t, channel.StatusDisabled, updated.Status)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-5", defaultAutoDisableCooldownMinutes)
+	require.Equal(t, ch.Credentials, updated.Credentials)
 
 	// The sentinel is bookkeeping only and must never reach real credentials.
 	require.NotContains(t, updated.Credentials.APIKeys, objects.OAuthCredentialRef)
@@ -238,9 +212,9 @@ func TestChannelService_OAuthPermanentRuleDegradesToDisable(t *testing.T) {
 	require.NotNil(t, updated.Credentials.OAuth)
 }
 
-// permanent_disable keeps the credential on the channel with no expiry, so the
-// cleanup task must never revive it and the key list must be left alone.
-func TestChannelService_PermanentDisableKeepsCredential(t *testing.T) {
+// A manual permanent credential disable has no expiry, so cleanup must not
+// revive it or alter the credential list.
+func TestChannelService_ManualPermanentDisableKeepsCredential(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -248,24 +222,7 @@ func TestChannelService_PermanentDisableKeepsCredential(t *testing.T) {
 	svc := newTestChannelService(client)
 
 	ch := createTestChannelWithAPIKeys(t, client, ctx, "permanent-keep", []string{"key1", "key2"})
-	ch, err := client.Channel.UpdateOneID(ch.ID).
-		SetPolicies(objects.ChannelPolicies{APIKeyAutoDisableRules: []objects.APIKeyAutoDisableRule{
-			{
-				StatusCodes: []int{401},
-				Times:       1,
-				Action:      objects.APIKeyAutoDisableActionPermanent,
-			},
-		}}).
-		Save(ctx)
-	require.NoError(t, err)
-	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
-
-	_, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID:          ch.ID,
-		APIKey:             "key1",
-		ResponseStatusCode: 401,
-	})
-	require.True(t, acted)
+	require.NoError(t, svc.DisableAPIKey(ctx, ch.ID, "key1", 401, "Manual permanent credential disable"))
 
 	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
@@ -273,8 +230,8 @@ func TestChannelService_PermanentDisableKeepsCredential(t *testing.T) {
 	require.Equal(t, "key1", updated.DisabledAPIKeys[0].Key)
 	require.Nil(t, updated.DisabledAPIKeys[0].ExpiresAt, "permanent disable must never expire")
 
-	// Unlike permanent_disable_delete, the key stays in the credentials, and the
-	// channel keeps serving on the remaining one.
+	// The key stays in the credentials, and the channel keeps serving on the
+	// remaining one.
 	require.Equal(t, []string{"key1", "key2"}, updated.Credentials.GetAllAPIKeys())
 	require.Equal(t, channel.StatusEnabled, updated.Status)
 
@@ -287,69 +244,54 @@ func TestChannelService_PermanentDisableKeepsCredential(t *testing.T) {
 }
 
 func TestNormalizeAPIKeyAutoDisableRules_UntilCron(t *testing.T) {
-	duration := 30
-
-	t.Run("cron action clears the duration and trims input", func(t *testing.T) {
+	duration := 45
+	t.Run("legacy cron becomes a temporary model rule and preserves positive duration", func(t *testing.T) {
 		policies := &objects.ChannelPolicies{APIKeyAutoDisableRules: []objects.APIKeyAutoDisableRule{{
-			StatusCodes:            []int{429},
-			Times:                  2,
-			Action:                 objects.APIKeyAutoDisableActionUntilCron,
-			DisableUntilCron:       "  0 0 * * *  ",
-			DisableUntilTimezone:   " Asia/Shanghai ",
+			StatusCodes: []int{429}, Times: 2, Action: objects.APIKeyAutoDisableActionUntilCron,
+			DisableUntilCron: "  0 0 * * *  ", DisableUntilTimezone: " Asia/Shanghai ",
 			DisableDurationMinutes: &duration,
 		}}}
-
 		require.NoError(t, NormalizeAPIKeyAutoDisableRules(policies))
-
 		rule := policies.APIKeyAutoDisableRules[0]
-		require.Equal(t, "0 0 * * *", rule.DisableUntilCron)
-		require.Equal(t, "Asia/Shanghai", rule.DisableUntilTimezone)
-		require.Nil(t, rule.DisableDurationMinutes)
-	})
-
-	t.Run("temporary action clears stale cron settings", func(t *testing.T) {
-		policies := &objects.ChannelPolicies{APIKeyAutoDisableRules: []objects.APIKeyAutoDisableRule{{
-			StatusCodes:            []int{429},
-			Times:                  2,
-			Action:                 objects.APIKeyAutoDisableActionTemporary,
-			DisableDurationMinutes: &duration,
-			DisableUntilCron:       "0 0 * * *",
-			DisableUntilTimezone:   "Asia/Shanghai",
-		}}}
-
-		require.NoError(t, NormalizeAPIKeyAutoDisableRules(policies))
-
-		rule := policies.APIKeyAutoDisableRules[0]
+		require.Equal(t, objects.APIKeyAutoDisableActionTemporary, rule.Action)
+		require.True(t, rule.FreezeModel)
+		require.Equal(t, defaultAutoDisableWindowMinutes, rule.WindowMinutes)
 		require.Empty(t, rule.DisableUntilCron)
 		require.Empty(t, rule.DisableUntilTimezone)
 		require.NotNil(t, rule.DisableDurationMinutes)
+		require.Equal(t, duration, *rule.DisableDurationMinutes)
 	})
-
+	t.Run("temporary action clears stale cron settings", func(t *testing.T) {
+		policies := &objects.ChannelPolicies{APIKeyAutoDisableRules: []objects.APIKeyAutoDisableRule{{
+			StatusCodes: []int{429}, Times: 2, Action: objects.APIKeyAutoDisableActionTemporary,
+			DisableDurationMinutes: &duration, DisableUntilCron: "0 0 * * *", DisableUntilTimezone: "Asia/Shanghai",
+		}}}
+		require.NoError(t, NormalizeAPIKeyAutoDisableRules(policies))
+		rule := policies.APIKeyAutoDisableRules[0]
+		require.Empty(t, rule.DisableUntilCron)
+		require.Empty(t, rule.DisableUntilTimezone)
+		require.True(t, rule.FreezeModel)
+		require.Equal(t, duration, *rule.DisableDurationMinutes)
+	})
 	for _, tt := range []struct {
 		name string
 		rule objects.APIKeyAutoDisableRule
 	}{
-		{
-			name: "missing cron expression",
-			rule: objects.APIKeyAutoDisableRule{Times: 1, Action: objects.APIKeyAutoDisableActionUntilCron},
-		},
-		{
-			name: "invalid cron expression",
-			rule: objects.APIKeyAutoDisableRule{Times: 1, Action: objects.APIKeyAutoDisableActionUntilCron, DisableUntilCron: "bogus"},
-		},
-		{
-			name: "invalid timezone",
-			rule: objects.APIKeyAutoDisableRule{
-				Times:                1,
-				Action:               objects.APIKeyAutoDisableActionUntilCron,
-				DisableUntilCron:     "0 0 * * *",
-				DisableUntilTimezone: "Mars/Olympus",
-			},
-		},
+		{name: "missing cron expression", rule: objects.APIKeyAutoDisableRule{Times: 1, Action: objects.APIKeyAutoDisableActionUntilCron}},
+		{name: "invalid cron expression", rule: objects.APIKeyAutoDisableRule{Times: 1, Action: objects.APIKeyAutoDisableActionUntilCron, DisableUntilCron: "bogus"}},
+		{name: "invalid timezone", rule: objects.APIKeyAutoDisableRule{Times: 1, Action: objects.APIKeyAutoDisableActionUntilCron, DisableUntilCron: "0 0 * * *", DisableUntilTimezone: "Mars/Olympus"}},
 	} {
-		t.Run(tt.name+" is rejected", func(t *testing.T) {
+		t.Run(tt.name+" is discarded instead of scheduled", func(t *testing.T) {
 			policies := &objects.ChannelPolicies{APIKeyAutoDisableRules: []objects.APIKeyAutoDisableRule{tt.rule}}
-			require.Error(t, NormalizeAPIKeyAutoDisableRules(policies))
+			require.NoError(t, NormalizeAPIKeyAutoDisableRules(policies))
+			rule := policies.APIKeyAutoDisableRules[0]
+			require.Equal(t, objects.APIKeyAutoDisableActionTemporary, rule.Action)
+			require.True(t, rule.FreezeModel)
+			require.Equal(t, defaultAutoDisableWindowMinutes, rule.WindowMinutes)
+			require.Empty(t, rule.DisableUntilCron)
+			require.Empty(t, rule.DisableUntilTimezone)
+			require.NotNil(t, rule.DisableDurationMinutes)
+			require.Equal(t, defaultAutoDisableCooldownMinutes, *rule.DisableDurationMinutes)
 		})
 	}
 }

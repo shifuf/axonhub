@@ -17,7 +17,7 @@ import {
   toApiKeyAutoDisableRuleFormValues,
 } from '../data/auto-disable';
 import { useBulkUpdateChannelAutoDisable, useChannelAutoDisableCopySources } from '../data/channels';
-import { Channel } from '../data/schema';
+import { Channel, areApiKeyAutoDisableRulesValid } from '../data/schema';
 import { ApiKeyAutoDisableRulesEditor } from './api-key-auto-disable-rules-editor';
 
 interface Props {
@@ -75,6 +75,10 @@ export function ChannelsBulkAutoDisableDialog({ open, onOpenChange, selectedChan
   };
 
   const handleSubmit = async () => {
+    if (action === 'write_rules' && !areApiKeyAutoDisableRulesValid(rules)) {
+      toast.error(t('channels.dialogs.apiKeyRules.validation.invalidRules'));
+      return;
+    }
     const built = buildBulkAutoDisableInput({
       channelIDs: selectedChannels.map((channel) => channel.id),
       action,
@@ -162,7 +166,7 @@ export function ChannelsBulkAutoDisableDialog({ open, onOpenChange, selectedChan
                 </Popover>
               </div>
 
-              <ApiKeyAutoDisableRulesEditor rules={rules} onChange={setRules} allowDelete={true} />
+              <ApiKeyAutoDisableRulesEditor rules={rules} onChange={setRules} />
 
               {overwriteTargets.length > 0 && (
                 <p className='text-sm text-amber-700 dark:text-amber-400'>
@@ -191,7 +195,7 @@ export function ChannelsBulkAutoDisableDialog({ open, onOpenChange, selectedChan
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={selectedChannels.length === 0 || mutation.isPending || (action === 'write_rules' && copySourcesLoading)}
+            disabled={selectedChannels.length === 0 || mutation.isPending || (action === 'write_rules' && (copySourcesLoading || !areApiKeyAutoDisableRulesValid(rules)))}
           >
             {mutation.isPending ? (
               <>

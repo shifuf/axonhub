@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
-import { formatDistanceToNow } from 'date-fns';
-import { enUS, zhCN } from 'date-fns/locale';
 import { useTranslation } from 'react-i18next';
 import { IconSnowflake } from '@tabler/icons-react';
 import { Badge } from '@/components/ui/badge';
+import { CooldownDetails, isActiveCooldown, useCooldownNow } from '@/features/channels/components/cooldown-details';
+import type { ModelCooldown } from '@/features/channels/data/schema';
 
 interface ChannelModel {
   requestModel: string;
@@ -14,6 +14,7 @@ interface Channel {
   name: string;
   type: string;
   status: string;
+  modelCooldowns?: ModelCooldown[];
 }
 
 interface KeyGroupRef {
@@ -38,6 +39,7 @@ export function ChannelModelsCard({
   dragHandle,
   frozenModels,
   freezeMenu,
+  originalRequestModel,
 }: {
   connection: { channel: Channel; keyGroup?: KeyGroupRef | null; models: ChannelModel[] };
   dragHandle?: ReactNode;
@@ -45,17 +47,33 @@ export function ChannelModelsCard({
   frozenModels?: string[];
   // Optional freeze/unfreeze menu rendered on the card header.
   freezeMenu?: ReactNode;
+  // Canonical gateway request identity, not the displayed provider aliases.
+  originalRequestModel?: string;
 }) {
-  const frozenSet = new Set(frozenModels ?? []);
-  // cooldown details (reason / expiry) come from the connection payload so the
-  // card can show why a model is frozen and when it thaws.
+  const now = useCooldownNow();
+  const activeCooldowns = (connection.channel.modelCooldowns ?? []).filter((cooldown) => isActiveCooldown(cooldown, now));
+  const canonicalCooldown = originalRequestModel
+    ? activeCooldowns.find((cooldown) => cooldown.model === originalRequestModel)
+    : undefined;
   const cooldownByModel = new Map<string, { reason?: string | null; expiresAt?: string | null }>();
-  for (const cooldown of connection.channel.modelCooldowns ?? []) {
-    if (!cooldownByModel.has(cooldown.model)) {
+  for (const cooldown of activeCooldowns) {
+    if (connection.models.some((entry) => entry.requestModel === cooldown.model)) {
       cooldownByModel.set(cooldown.model, { reason: cooldown.reason, expiresAt: cooldown.expiresAt });
     }
   }
-  const { t, i18n } = useTranslation();
+  // Gateway-model freezes apply to every provider alias for this card; legacy
+  // upstream-model freezes remain visible only for their exact displayed row.
+  if (canonicalCooldown) {
+    for (const model of connection.models.map((entry) => entry.requestModel)) {
+      cooldownByModel.set(model, { reason: canonicalCooldown.reason, expiresAt: canonicalCooldown.expiresAt });
+    }
+  }
+  const frozenSet = new Set(
+    (frozenModels ?? [...cooldownByModel.keys()]).filter((model) =>
+      connection.models.some((entry) => entry.requestModel === model),
+    ),
+  );
+  const { t } = useTranslation();
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -112,24 +130,15 @@ export function ChannelModelsCard({
           <p className='text-muted-foreground text-xs'>{t('models.dialogs.association.previewNoModels')}</p>
         ) : (
           connection.models.map((model) => (
-            <div key={model.requestModel} className='bg-muted flex items-center gap-1 rounded px-2 py-1 text-xs'>
-              {model.requestModel}
+            <div key={model.requestModel} className='bg-muted space-y-1 rounded px-2 py-1 text-xs'>
+              <div className='flex items-center gap-1'>
+                <span className='break-all'>{model.requestModel}</span>
+                {frozenSet.has(model.requestModel) && (
+                  <IconSnowflake className='h-3 w-3 shrink-0 text-cyan-600 dark:text-cyan-400' />
+                )}
+              </div>
               {frozenSet.has(model.requestModel) && (
-                <span className='flex shrink-0 items-center gap-1 text-cyan-600 dark:text-cyan-400'>
-                  <IconSnowflake className='h-3 w-3' />
-                  {(() => {
-                    const detail = cooldownByModel.get(model.requestModel);
-                    if (!detail?.expiresAt) return null;
-                    const expires = new Date(detail.expiresAt).getTime();
-                    if (expires <= Date.now()) return null;
-                    const locale = i18n.language.startsWith('zh') ? zhCN : enUS;
-                    return (
-                      <span className='text-[10px]'>
-                        {formatDistanceToNow(new Date(detail.expiresAt), { locale, addSuffix: false })}
-                      </span>
-                    );
-                  })()}
-                </span>
+                <CooldownDetails {...cooldownByModel.get(model.requestModel)} now={now} />
               )}
             </div>
           ))

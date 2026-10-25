@@ -1,11 +1,10 @@
 package biz
 
-import (
-	"slices"
-	"strings"
-)
+import "slices"
 
 const (
+	// Legacy action names remain readable, but every automatic cancellation
+	// policy is normalized to a temporary channel-model freeze.
 	ClientCancellationActionSwitchAndCooldown = "switch_and_cooldown"
 	ClientCancellationActionCooldownOnly      = "cooldown_only"
 	// ClientCancellationActionCooldownModel cools down only the (channel, model)
@@ -53,11 +52,7 @@ func normalizeClientCancellationPolicy(policy *ClientCancellationPolicy) error {
 		policy.CooldownMinutes = maxClientCancellationCooldownMinutes
 	}
 
-	switch policy.Action {
-	case ClientCancellationActionSwitchAndCooldown, ClientCancellationActionCooldownOnly, ClientCancellationActionCooldownModel:
-	default:
-		policy.Action = ClientCancellationActionSwitchAndCooldown
-	}
+	policy.Action = normalizeClientCancellationAction(policy.Action)
 
 	switch policy.Scope {
 	case ClientCancellationScopeGlobal, ClientCancellationScopeProjectFirst:
@@ -93,11 +88,7 @@ func normalizeClientCancellationPolicy(policy *ClientCancellationPolicy) error {
 		if override.CooldownMinutes > maxClientCancellationCooldownMinutes {
 			override.CooldownMinutes = maxClientCancellationCooldownMinutes
 		}
-		switch override.Action {
-		case ClientCancellationActionSwitchAndCooldown, ClientCancellationActionCooldownOnly, ClientCancellationActionCooldownModel:
-		default:
-			override.Action = policy.Action
-		}
+		override.Action = normalizeClientCancellationAction(override.Action)
 		seen[override.ProjectID] = struct{}{}
 		overrides = append(overrides, override)
 	}
@@ -110,6 +101,10 @@ func normalizeClientCancellationPolicy(policy *ClientCancellationPolicy) error {
 // settings are used unless project_first is enabled and an enabled override
 // exists for the project.
 func (p ClientCancellationPolicy) EffectiveClientCancellationPolicy(projectID int) (ClientCancellationPolicy, string) {
+	// Defaults and cached policies can still contain legacy actions. Normalize
+	// a private copy (including overrides) before resolving the runtime policy.
+	_ = normalizeClientCancellationPolicy(&p)
+
 	if p.Scope == ClientCancellationScopeProjectFirst && projectID > 0 {
 		for _, override := range p.ProjectOverrides {
 			if override.ProjectID != projectID || !override.Enabled {
@@ -136,12 +131,9 @@ func (p ClientCancellationPolicy) EffectiveClientCancellationPolicy(projectID in
 	}, "global"
 }
 
-func normalizeClientCancellationAction(action string) string {
-	action = strings.TrimSpace(action)
-	switch action {
-	case ClientCancellationActionSwitchAndCooldown, ClientCancellationActionCooldownOnly, ClientCancellationActionCooldownModel:
-		return action
-	default:
-		return ClientCancellationActionSwitchAndCooldown
-	}
+// normalizeClientCancellationAction migrates legacy and unknown actions to the
+// only safe automatic target. No cancellation policy may disable credentials or
+// broaden a model freeze to the entire channel.
+func normalizeClientCancellationAction(_ string) string {
+	return ClientCancellationActionCooldownModel
 }

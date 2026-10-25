@@ -318,7 +318,7 @@ type RetryPolicy struct {
 	// the current trace or thread is selected before normal load balancing.
 	TraceStickyMode TraceStickyMode `json:"trace_sticky_mode"`
 
-	// AutoDisableChannel controls whether to auto-disable a channel or API key when it exceeds the maximum number of retries.
+	// AutoDisableChannel controls rolling model cooldown rules and their sixth-failure permanent channel safeguard. Automatic policies never disable API keys.
 	// For compatibility with legacy setting, the name is AutoDisableChannel.
 	// If the channel has more than one key, the API key will be disabled instead of the channel.
 	AutoDisableChannel AutoDisableChannel `json:"auto_disable_channel"`
@@ -400,8 +400,8 @@ type UpstreamErrorPolicy struct {
 // ClientCancellationPolicy controls routing behavior after consecutive client
 // cancellations (including an explicit stop by the user).
 type ClientCancellationPolicy struct {
-	Enabled          bool                              `json:"enabled"`
-	Threshold        int                               `json:"threshold"`
+	Enabled   bool `json:"enabled"`
+	Threshold int  `json:"threshold"`
 	// WindowMinutes is the sliding window for cancellations: the cooldown
 	// triggers when at least Threshold cancellations happen within the last
 	// WindowMinutes. 0 falls back to the default window.
@@ -427,6 +427,12 @@ type AutoDisableChannel struct {
 
 	// Rules are the global auto-disable rules, sharing the channel rule shape.
 	Rules []objects.APIKeyAutoDisableRule `json:"rules"`
+
+	// PermanentFailureThreshold is the rolling-window safeguard: when a channel
+	// and request model accumulate this many failures inside the shared window
+	// (across every rule), that model is permanently frozen on the channel until
+	// manual recovery. 0/missing falls back to defaultPermanentModelFailureThreshold.
+	PermanentFailureThreshold int `json:"permanent_failure_threshold"`
 
 	// Statuses is read-only compatibility for legacy retry_policy JSON. It is
 	// migrated into Rules by normalizeRetryPolicy and never written back.
@@ -1112,6 +1118,16 @@ func (s *SystemService) RetryPolicyOrDefault(ctx context.Context) *RetryPolicy {
 
 // SetRetryPolicy sets the retry policy configuration.
 func (s *SystemService) SetRetryPolicy(ctx context.Context, policy *RetryPolicy) error {
+	// Reject malformed submitted values before best-effort read normalization
+	// upgrades missing fields and legacy targets/actions.
+	if _, err := normalizeAutoDisableRules(policy.AutoDisableChannel.Rules, false); err != nil {
+		return xerrors.ValidationError(err.Error())
+	}
+	if policy.AutoDisableChannel.PermanentFailureThreshold < 0 || policy.AutoDisableChannel.PermanentFailureThreshold > maxPermanentModelFailureThreshold {
+		return xerrors.ValidationError(fmt.Sprintf(
+			"auto-disable permanent failure threshold must be between 1 and %d (0 uses the default %d)",
+			maxPermanentModelFailureThreshold, defaultPermanentModelFailureThreshold))
+	}
 	normalizeRetryPolicy(policy)
 
 	rules, err := normalizeAutoDisableRules(policy.AutoDisableChannel.Rules, false)
@@ -1189,6 +1205,16 @@ func normalizeRetryPolicy(policy *RetryPolicy) {
 	policy.AutoDisableChannel.Statuses = nil
 	if policy.AutoDisableChannel.Rules == nil {
 		policy.AutoDisableChannel.Rules = []objects.APIKeyAutoDisableRule{}
+	}
+	for i := range policy.AutoDisableChannel.Rules {
+		policy.AutoDisableChannel.Rules[i] = effectiveModelFreezeRule(policy.AutoDisableChannel.Rules[i])
+	}
+
+	if policy.AutoDisableChannel.PermanentFailureThreshold <= 0 {
+		policy.AutoDisableChannel.PermanentFailureThreshold = defaultRetryPolicy.AutoDisableChannel.PermanentFailureThreshold
+	}
+	if policy.AutoDisableChannel.PermanentFailureThreshold > maxPermanentModelFailureThreshold {
+		policy.AutoDisableChannel.PermanentFailureThreshold = maxPermanentModelFailureThreshold
 	}
 
 	// Normalization here is best-effort for reads of legacy configs. Invalid

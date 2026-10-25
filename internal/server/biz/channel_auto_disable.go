@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aptible/supercronic/cronexpr"
 
@@ -26,6 +27,39 @@ const (
 	autoDisableScopeGlobal  autoDisableScope = "global"
 )
 
+const (
+	defaultAutoDisableWindowMinutes   = 10
+	defaultAutoDisableCooldownMinutes = 30
+	// defaultPermanentModelFailureThreshold is the fallback safeguard threshold:
+	// this many failures for one channel×model inside the shared rolling window
+	// permanently freeze the model on that channel. Configurable through the
+	// retry policy (AutoDisableChannel.PermanentFailureThreshold).
+	defaultPermanentModelFailureThreshold = 6
+	maxPermanentModelFailureThreshold     = 1000
+)
+
+// The rolling failure window is persisted in the channel_failure_events table
+// (see channel_failure_window.go). Rows are shared by every server instance, so
+// a restart or a multi-instance deployment keeps counting the same failures.
+
+// effectiveModelFreezeRule upgrades every legacy action/target in memory too,
+// so old persisted settings cannot continue disabling or deleting credentials.
+func effectiveModelFreezeRule(rule objects.APIKeyAutoDisableRule) objects.APIKeyAutoDisableRule {
+	rule.Action = objects.APIKeyAutoDisableActionTemporary
+	rule.FreezeModel = true
+	rule.DisableUntilCron = ""
+	rule.DisableUntilTimezone = ""
+	if rule.WindowMinutes <= 0 {
+		rule.WindowMinutes = defaultAutoDisableWindowMinutes
+	}
+	duration := defaultAutoDisableCooldownMinutes
+	if rule.DisableDurationMinutes != nil && *rule.DisableDurationMinutes > 0 {
+		duration = *rule.DisableDurationMinutes
+	}
+	rule.DisableDurationMinutes = &duration
+	return rule
+}
+
 func (svc *ChannelService) markChannelUnavailable(
 	ctx context.Context,
 	channelID int,
@@ -34,7 +68,7 @@ func (svc *ChannelService) markChannelUnavailable(
 	actualCount int,
 	expiresAt *time.Time,
 	reason string,
-) {
+) bool {
 	ctx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -42,14 +76,14 @@ func (svc *ChannelService) markChannelUnavailable(
 		reason = deriveErrorMessage(responseStatusCode)
 	}
 
-	// Only disable channels that are currently enabled to avoid repeated disabling
-	// of the same channel under sustained error traffic, which would keep resetting
-	// the cache debounce timer and prevent the cache from ever refreshing.
+	// Avoid repeatedly disabling the same channel. The sixth-failure guard
+	// must also upgrade any legacy temporary channel disable to permanent.
+	eligible := channel.StatusEQ(channel.StatusEnabled)
+	if expiresAt == nil && threshold == defaultPermanentModelFailureThreshold && actualCount >= defaultPermanentModelFailureThreshold {
+		eligible = channel.Or(eligible, channel.AutoDisableExpiresAtNotNil())
+	}
 	update := svc.db.Channel.Update().
-		Where(
-			channel.ID(channelID),
-			channel.StatusEQ(channel.StatusEnabled),
-		).
+		Where(channel.ID(channelID), eligible).
 		SetStatus(channel.StatusDisabled).
 		SetErrorMessage(reason).
 		SetAutoDisabledAt(time.Now())
@@ -67,7 +101,7 @@ func (svc *ChannelService) markChannelUnavailable(
 			log.Cause(err),
 		)
 
-		return
+		return false
 	}
 
 	if affected == 0 {
@@ -86,7 +120,7 @@ func (svc *ChannelService) markChannelUnavailable(
 			)
 		}
 
-		return
+		return true
 	}
 
 	log.Warn(ctx, "Channel disabled due to unrecoverable error",
@@ -127,6 +161,7 @@ func (svc *ChannelService) markChannelUnavailable(
 
 	// Also notify other instances via the watcher for cross-instance cache invalidation.
 	svc.asyncReloadChannels()
+	return true
 }
 
 func (svc *ChannelService) asyncNotifyChannelAutoDisabled(ctx context.Context, event ChannelAutoDisabledEvent) {
@@ -143,25 +178,31 @@ func (svc *ChannelService) asyncNotifyChannelAutoDisabled(ctx context.Context, e
 	}()
 }
 
-// EvaluateAPIKeyRulesForFailure evaluates auto-disable rules for a failure that
-// was persisted outside the normal performance middleware path. Empty API keys
-// stay on RecordPerformance; this bypass exists only for keyed failures.
+// EvaluateAPIKeyRulesForFailure retains its historical name for callers that
+// persist failures outside performance middleware. The original request model
+// is required for actions; credentials are never the automatic action target.
 func (svc *ChannelService) EvaluateAPIKeyRulesForFailure(
 	ctx context.Context,
 	channelID int,
 	apiKey string,
 	responseStatusCode int,
 	errorMessage string,
+	requestModel ...string,
 ) bool {
-	if channelID == 0 || apiKey == "" {
+	if channelID == 0 {
 		return false
 	}
 
+	model := ""
+	if len(requestModel) > 0 {
+		model = requestModel[0]
+	}
 	_, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
 		ChannelID:          channelID,
 		APIKey:             apiKey,
 		ResponseStatusCode: responseStatusCode,
 		ErrorMessage:       errorMessage,
+		Model:              model,
 	})
 	return acted
 }
@@ -172,22 +213,32 @@ func (svc *ChannelService) evaluateAutoDisableForFailure(ctx context.Context, pe
 		return false, false
 	}
 
-	switch ch.Policies.EffectiveAutoDisableMode() {
-	case objects.APIKeyAutoDisableModeOff:
+	mode := ch.Policies.EffectiveAutoDisableMode()
+	if mode == objects.APIKeyAutoDisableModeOff {
 		return false, false
-	case objects.APIKeyAutoDisableModeCustom:
-		matched, acted = svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel)
+	}
+
+	// Channel-scope and global-scope rules share the same channel×model window,
+	// so the permanent-freeze safeguard threshold is resolved once per failure
+	// from the global retry policy.
+	policy := svc.SystemService.RetryPolicyOrDefault(ctx)
+	threshold := policy.AutoDisableChannel.PermanentFailureThreshold
+	if threshold <= 0 {
+		threshold = defaultPermanentModelFailureThreshold
+	}
+
+	if mode == objects.APIKeyAutoDisableModeCustom {
+		matched, acted = svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel, threshold)
 		if matched {
 			return matched, acted
 		}
 	}
 
-	policy := svc.SystemService.RetryPolicyOrDefault(ctx)
 	if !policy.AutoDisableChannel.Enabled || len(policy.AutoDisableChannel.Rules) == 0 {
 		return false, false
 	}
 
-	return svc.evaluateRules(ctx, perf, policy.AutoDisableChannel.Rules, autoDisableScopeGlobal)
+	return svc.evaluateRules(ctx, perf, policy.AutoDisableChannel.Rules, autoDisableScopeGlobal, threshold)
 }
 
 // checkAndHandleChannelAPIKeyRules evaluates the channel's own rules only. Tests
@@ -198,107 +249,35 @@ func (svc *ChannelService) checkAndHandleChannelAPIKeyRules(ctx context.Context,
 		return false, false
 	}
 
-	return svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel)
+	threshold := svc.SystemService.RetryPolicyOrDefault(ctx).AutoDisableChannel.PermanentFailureThreshold
+	if threshold <= 0 {
+		threshold = defaultPermanentModelFailureThreshold
+	}
+	return svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel, threshold)
 }
 
-// evaluateRules finds the first matching rule and increments that rule's
-// independent counter. Other rules and unmatched failures leave counts alone.
-func (svc *ChannelService) evaluateRules(
-	ctx context.Context,
-	perf *PerformanceRecord,
-	rules []objects.APIKeyAutoDisableRule,
-	scope autoDisableScope,
-) (matched, acted bool) {
-	if len(rules) == 0 {
-		return false, false
-	}
-
-	for ruleIndex, rule := range rules {
-		if !matchesAPIKeyRule(rule, perf) {
+// evaluateRules counts the first matching rule once per failure. The action
+// target is always the original request model, regardless of legacy flags.
+func (svc *ChannelService) evaluateRules(ctx context.Context, perf *PerformanceRecord, rules []objects.APIKeyAutoDisableRule, scope autoDisableScope, permanentThreshold int) (matched, acted bool) {
+	for ruleIndex, storedRule := range rules {
+		if !matchesAPIKeyRule(storedRule, perf) {
 			continue
 		}
-
-		ruleKey := apiKeyRuleCounterKey(autoDisableCounterIdentity(perf), scope, ruleIndex, rule)
-		// Every failure accepted by one rule contributes to that rule's single
-		// consecutive counter, including alternating configured status codes.
-		const countKey = 0
-
-		svc.apiKeyErrorCountsLock.Lock()
-		if svc.apiKeyErrorCounts[perf.ChannelID] == nil {
-			svc.apiKeyErrorCounts[perf.ChannelID] = make(map[string]map[int]int)
+		if strings.TrimSpace(perf.Model) == "" {
+			return true, false
 		}
-		if svc.apiKeyRuleActionsInFlight == nil {
-			svc.apiKeyRuleActionsInFlight = make(map[int]map[string]bool)
-		}
-		if svc.apiKeyRuleActionsInFlight[perf.ChannelID] == nil {
-			svc.apiKeyRuleActionsInFlight[perf.ChannelID] = make(map[string]bool)
-		}
-		if svc.apiKeyErrorCounts[perf.ChannelID][ruleKey] == nil {
-			svc.apiKeyErrorCounts[perf.ChannelID][ruleKey] = make(map[int]int)
-		}
-		svc.apiKeyErrorCounts[perf.ChannelID][ruleKey][countKey]++
-		count := svc.apiKeyErrorCounts[perf.ChannelID][ruleKey][countKey]
-		threshold := max(rule.Times, 1)
-		_, actionInFlight := svc.apiKeyRuleActionsInFlight[perf.ChannelID][ruleKey]
-		shouldAct := count >= threshold && !actionInFlight
-		if shouldAct {
-			svc.apiKeyErrorCounts[perf.ChannelID][ruleKey][countKey] -= threshold
-			svc.apiKeyRuleActionsInFlight[perf.ChannelID][ruleKey] = false
-		}
-		svc.apiKeyErrorCountsLock.Unlock()
-
-		if shouldAct {
-			actionSucceeded := svc.executeMatchedRuleAction(ctx, perf, rule, count)
-			svc.apiKeyErrorCountsLock.Lock()
-			if streakReset, stillClaimed := svc.apiKeyRuleActionsInFlight[perf.ChannelID][ruleKey]; stillClaimed {
-				delete(svc.apiKeyRuleActionsInFlight[perf.ChannelID], ruleKey)
-				if !actionSucceeded && !streakReset {
-					if svc.apiKeyErrorCounts[perf.ChannelID] == nil {
-						svc.apiKeyErrorCounts[perf.ChannelID] = make(map[string]map[int]int)
-					}
-					if svc.apiKeyErrorCounts[perf.ChannelID][ruleKey] == nil {
-						svc.apiKeyErrorCounts[perf.ChannelID][ruleKey] = make(map[int]int)
-					}
-					svc.apiKeyErrorCounts[perf.ChannelID][ruleKey][countKey] += threshold
-				}
-				if svc.apiKeyErrorCounts[perf.ChannelID][ruleKey][countKey] == 0 {
-					delete(svc.apiKeyErrorCounts[perf.ChannelID], ruleKey)
-				}
-			}
-			svc.apiKeyErrorCountsLock.Unlock()
-			return true, actionSucceeded
-		}
-
-		return true, false
+		rule := effectiveModelFreezeRule(storedRule)
+		ruleKey := apiKeyRuleCounterKey(autoDisableRuleIdentity(perf, rule), scope, ruleIndex, rule)
+		return true, svc.evaluateWindowedRule(ctx, perf, rule, ruleKey, permanentThreshold)
 	}
-
 	return false, false
 }
 
-func (svc *ChannelService) clearAutoDisableCountsOnSuccess(perf *PerformanceRecord) {
-	svc.apiKeyErrorCountsLock.Lock()
-	defer svc.apiKeyErrorCountsLock.Unlock()
+// Success never removes failures that still belong to a rolling window.
+func (svc *ChannelService) clearAutoDisableCountsOnSuccess(_ *PerformanceRecord) {}
 
-	identity := autoDisableCounterIdentity(perf)
-	prefix := identity + ":"
-	for key := range svc.apiKeyErrorCounts[perf.ChannelID] {
-		if key == identity || strings.HasPrefix(key, prefix) {
-			delete(svc.apiKeyErrorCounts[perf.ChannelID], key)
-		}
-	}
-	for key := range svc.apiKeyRuleActionsInFlight[perf.ChannelID] {
-		if key == identity || strings.HasPrefix(key, prefix) {
-			svc.apiKeyRuleActionsInFlight[perf.ChannelID][key] = true
-		}
-	}
-}
-
-func autoDisableCounterIdentity(perf *PerformanceRecord) string {
-	if perf.APIKey != "" {
-		return perf.APIKey
-	}
-
-	return fmt.Sprintf("channel:%d", perf.ChannelID)
+func autoDisableRuleIdentity(perf *PerformanceRecord, _ objects.APIKeyAutoDisableRule) string {
+	return fmt.Sprintf("channel-model:%d:%q", perf.ChannelID, perf.Model)
 }
 
 func apiKeyRuleCounterKey(identity string, scope autoDisableScope, ruleIndex int, rule objects.APIKeyAutoDisableRule) string {
@@ -308,7 +287,7 @@ func apiKeyRuleCounterKey(identity string, scope autoDisableScope, ruleIndex int
 	}
 
 	return fmt.Sprintf(
-		"%s:%s:rule:%d:%v:%v:%d:%s:%d",
+		"%s:%s:rule:%d:%v:%v:%d:%s:%d:%d:%v:%q:%q",
 		identity,
 		scope,
 		ruleIndex,
@@ -317,6 +296,10 @@ func apiKeyRuleCounterKey(identity string, scope autoDisableScope, ruleIndex int
 		rule.Times,
 		rule.Action,
 		disableDurationMinutes,
+		rule.WindowMinutes,
+		rule.FreezeModel,
+		rule.DisableUntilCron,
+		rule.DisableUntilTimezone,
 	)
 }
 
@@ -394,172 +377,152 @@ func nextAPIKeyRuleCronOccurrence(rule objects.APIKeyAutoDisableRule, now time.T
 	return next, nil
 }
 
-func (svc *ChannelService) executeMatchedRuleAction(
-	ctx context.Context,
-	perf *PerformanceRecord,
-	rule objects.APIKeyAutoDisableRule,
-	count int,
-) bool {
-	if perf.APIKey == "" {
-		return svc.executeChannelRuleAction(ctx, perf, rule, count)
-	}
-
-	return svc.executeAPIKeyRuleAction(ctx, perf, rule, count)
+func (svc *ChannelService) executeMatchedRuleAction(ctx context.Context, perf *PerformanceRecord, rule objects.APIKeyAutoDisableRule, count int) bool {
+	return svc.executeModelRuleAction(ctx, perf, effectiveModelFreezeRule(rule), count)
 }
 
-func (svc *ChannelService) executeAPIKeyRuleAction(
-	ctx context.Context,
-	perf *PerformanceRecord,
-	rule objects.APIKeyAutoDisableRule,
-	count int,
-) bool {
-	reason := fmt.Sprintf("Disabled by auto-disable rule after %d consecutive errors", count)
+// autoDisableFailureSummary describes the effective rolling model window.
+func autoDisableFailureSummary(rule objects.APIKeyAutoDisableRule, count int) string {
+	return fmt.Sprintf("%d failures within %d minutes", count, effectiveModelFreezeRule(rule).WindowMinutes)
+}
 
-	action := rule.Action
+var autoDisableBearerSecret = regexp.MustCompile(`(?i)(bearer\s+)[a-zA-Z0-9._~+/=\-]+`)
+var autoDisableNamedSecret = regexp.MustCompile(`(?i)((?:api[-_]?key|access[-_]?token|refresh[-_]?token|authorization)["']?\s*[:=]\s*["']?)[^"'&\s,}]+`)
 
-	// An OAuth channel's credential cannot be deleted: DeleteDisabledAPIKeys
-	// rejects OAuth channels outright, so running the delete step would report the
-	// action as failed, restore the error counter and retry on every subsequent
-	// failure. Fall back to keeping it disabled, which is the same observable
-	// outcome for a channel holding a single credential.
-	if action == objects.APIKeyAutoDisableActionPermanentDelete && perf.APIKey == objects.OAuthCredentialRef {
-		action = objects.APIKeyAutoDisableActionPermanent
+// autoDisableErrorDetail persists the diagnostic message, not the raw response
+// body appended for keyword matching. Providers sometimes echo credentials, so
+// remove the selected key and common token forms before exposing the reason.
+func autoDisableErrorDetail(perf *PerformanceRecord) string {
+	message, _, _ := strings.Cut(perf.ErrorMessage, "\n")
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = deriveErrorMessage(perf.ResponseStatusCode)
 	}
-
-	switch action {
-	case objects.APIKeyAutoDisableActionUntilCron:
-		expiresAt, err := nextAPIKeyRuleCronOccurrence(rule, time.Now())
-		if err != nil {
-			log.Error(ctx, "Failed to resolve api key rule cron schedule",
-				log.Int("channel_id", perf.ChannelID),
-				log.String("cron", rule.DisableUntilCron),
-				log.Cause(err),
-			)
-
-			return false
-		}
-
-		reason = fmt.Sprintf("Disabled until %s by auto-disable rule after %d consecutive errors",
-			expiresAt.Format(time.RFC3339), count)
-
-		if err := svc.DisableAPIKey(ctx, perf.ChannelID, perf.APIKey, perf.ResponseStatusCode, reason, &expiresAt); err != nil {
-			log.Error(ctx, "Failed to disable API key until cron occurrence",
-				log.Int("channel_id", perf.ChannelID),
-				log.Cause(err),
-			)
-
-			return false
-		}
-
-		return true
-
-	case objects.APIKeyAutoDisableActionPermanent:
-		// No expiry, so the cleanup task never revives it: the credential stays on
-		// the channel until an operator re-enables it.
-		if err := svc.DisableAPIKey(ctx, perf.ChannelID, perf.APIKey, perf.ResponseStatusCode, reason); err != nil {
-			log.Error(ctx, "Failed to permanently disable API key by auto-disable rule",
-				log.Int("channel_id", perf.ChannelID),
-				log.Cause(err),
-			)
-
-			return false
-		}
-
-		return true
-
-	case objects.APIKeyAutoDisableActionPermanentDelete:
-		if err := svc.DisableAPIKey(ctx, perf.ChannelID, perf.APIKey, perf.ResponseStatusCode, reason); err != nil {
-			log.Error(ctx, "Failed to permanently disable API key by auto-disable rule",
-				log.Int("channel_id", perf.ChannelID),
-				log.Cause(err),
-			)
-
-			return false
-		}
-
-		result, err := svc.DeleteDisabledAPIKeys(ctx, perf.ChannelID, []string{perf.APIKey})
-		if err != nil {
-			log.Error(ctx, "Failed to delete API key disabled by auto-disable rule",
-				log.Int("channel_id", perf.ChannelID),
-				log.Cause(err),
-			)
-
-			return false
-		}
-
-		// Channels must retain at least one credential. Keep that last key
-		// permanently disabled when deletion cannot remove it, otherwise the
-		// delete helper would make the rule a no-op by re-enabling the channel.
-		if result.Message == "ONE_KEY_PRESERVED" {
-			if err := svc.DisableAPIKey(ctx, perf.ChannelID, perf.APIKey, perf.ResponseStatusCode, reason); err != nil {
-				log.Error(ctx, "Failed to keep preserved API key disabled by auto-disable rule",
-					log.Int("channel_id", perf.ChannelID),
-					log.Cause(err),
-				)
-
-				return false
-			}
-		}
-
-		return true
+	if perf.APIKey != "" && perf.APIKey != objects.OAuthCredentialRef {
+		message = strings.ReplaceAll(message, perf.APIKey, "[REDACTED]")
 	}
-
-	var expiresAt *time.Time
-	if rule.DisableDurationMinutes != nil {
-		disabledUntil := time.Now().Add(time.Duration(*rule.DisableDurationMinutes) * time.Minute)
-		expiresAt = &disabledUntil
-		reason = fmt.Sprintf("Temporarily disabled for %d minutes by auto-disable rule after %d consecutive errors", *rule.DisableDurationMinutes, count)
+	message = autoDisableBearerSecret.ReplaceAllString(message, "${1}[REDACTED]")
+	message = autoDisableNamedSecret.ReplaceAllString(message, "${1}[REDACTED]")
+	message = strings.ToValidUTF8(message, "�")
+	const maxErrorBytes = 2048
+	if len(message) > maxErrorBytes {
+		message = message[:maxErrorBytes]
+		for !utf8.ValidString(message) {
+			message = message[:len(message)-1]
+		}
+		message += "..."
 	}
+	if perf.ResponseStatusCode > 0 {
+		return fmt.Sprintf("HTTP %d: %s", perf.ResponseStatusCode, message)
+	}
+	return message
+}
 
-	if err := svc.DisableAPIKey(ctx, perf.ChannelID, perf.APIKey, perf.ResponseStatusCode, reason, expiresAt); err != nil {
-		log.Error(ctx, "Failed to temporarily disable API key by auto-disable rule",
-			log.Int("channel_id", perf.ChannelID),
-			log.Cause(err),
-		)
+func (svc *ChannelService) executeModelRuleAction(ctx context.Context, perf *PerformanceRecord, rule objects.APIKeyAutoDisableRule, count int) bool {
+	return svc.executeModelRuleActionDetail(ctx, perf, rule, count, autoDisableErrorDetail(perf))
+}
+
+// executeModelRuleActionDetail lets persisted-window callers pass the error
+// detail that was already redacted when the failure event was recorded.
+func (svc *ChannelService) executeModelRuleActionDetail(ctx context.Context, perf *PerformanceRecord, rule objects.APIKeyAutoDisableRule, count int, detail string) bool {
+	if strings.TrimSpace(perf.Model) == "" {
+		return false
+	}
+	rule = effectiveModelFreezeRule(rule)
+	duration := *rule.DisableDurationMinutes
+	expiresAt := time.Now().Add(time.Duration(duration) * time.Minute)
+	reason := fmt.Sprintf("Model cooldown: %s, auto-recover after %d minutes\n%s", autoDisableFailureSummary(rule, count), duration, detail)
+	return svc.markChannelModelCooldownUntil(ctx, perf.ChannelID, perf.Model, reason, &expiresAt)
+}
+
+func (svc *ChannelService) executePermanentModelFailureGuard(ctx context.Context, perf *PerformanceRecord, windowMinutes, count, threshold int) bool {
+	return svc.executePermanentModelFailureGuardDetail(ctx, perf, windowMinutes, count, threshold, autoDisableErrorDetail(perf))
+}
+
+// executePermanentModelFailureGuardDetail permanently freezes only the failing
+// channel×model: the channel itself and its other models keep serving. It lets
+// persisted-window callers pass the error detail that was already redacted when
+// the failure event was recorded.
+func (svc *ChannelService) executePermanentModelFailureGuardDetail(ctx context.Context, perf *PerformanceRecord, windowMinutes, count, threshold int, detail string) bool {
+	if strings.TrimSpace(perf.Model) == "" {
+		return false
+	}
+	reason := fmt.Sprintf("Permanently frozen model %q reached %d failures within %d minutes (threshold %d); manual recovery required\n%s", perf.Model, count, windowMinutes, threshold, detail)
+	return svc.markChannelModelCooldownPermanent(ctx, perf.ChannelID, perf.Model, reason)
+}
+
+// evaluateWindowedRule retains the triggering failures instead of consuming
+// them. A temporary freeze cannot conceal the safeguard failure, including failures
+// arriving while its persistence action is already in flight. Every failure is
+// persisted first (see channel_failure_window.go), so the rolling window counts
+// survive restarts and merge across server instances; only the action claim
+// stays in-process, and the persisted cooldown writes stay CAS-protected.
+func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *PerformanceRecord, rule objects.APIKeyAutoDisableRule, ruleKey string, permanentThreshold int) bool {
+	rule = effectiveModelFreezeRule(rule)
+	window := time.Duration(rule.WindowMinutes) * time.Minute
+	now := time.Now()
+	failedAt := perf.EndTime
+	if failedAt.IsZero() || failedAt.After(now) {
+		failedAt = now
+	}
+	if !failedAt.After(now.Add(-window)) {
+		return false
+	}
+	windowKey := fmt.Sprintf("%s:window:%d", autoDisableRuleIdentity(perf, rule), rule.WindowMinutes)
+
+	if err := svc.recordChannelFailureEvent(ctx, perf, ruleKey, windowKey, failedAt); err != nil {
+		log.Error(ctx, "failed to persist channel failure event", log.Cause(err), log.Int("channel_id", perf.ChannelID))
 		return false
 	}
 
-	return true
-}
-
-func (svc *ChannelService) executeChannelRuleAction(
-	ctx context.Context,
-	perf *PerformanceRecord,
-	rule objects.APIKeyAutoDisableRule,
-	count int,
-) bool {
-	reason := fmt.Sprintf("Disabled by auto-disable rule after %d consecutive errors", count)
-	action := rule.Action
-	if action == objects.APIKeyAutoDisableActionPermanentDelete {
-		log.Warn(ctx, "permanent_disable_delete degraded to permanent_disable for keyless channel",
-			log.Int("channel_id", perf.ChannelID),
-		)
-		action = objects.APIKeyAutoDisableActionPermanent
+	snapshot, err := svc.countChannelFailureEvents(ctx, ruleKey, windowKey, now.Add(-window))
+	if err != nil {
+		log.Error(ctx, "failed to count channel failure window", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+		return false
 	}
 
-	var expiresAt *time.Time
-	switch action {
-	case objects.APIKeyAutoDisableActionUntilCron:
-		next, err := nextAPIKeyRuleCronOccurrence(rule, time.Now())
+	permanent := snapshot.windowTotal >= permanentThreshold
+	if !permanent && snapshot.ruleCount < max(rule.Times, 1) {
+		return false
+	}
+	if !svc.claimWindowedRuleAction(perf.ChannelID, windowKey) {
+		return false
+	}
+
+	// The event inserted above always belongs to the window, so snapshot.latest
+	// is never nil in practice; keep the fallback for robustness anyway.
+	failureDetail := autoDisableErrorDetail(perf)
+	latestFailure := *perf
+	if snapshot.latest != nil {
+		latestFailure = performanceRecordFromFailureEvent(snapshot.latest)
+		failureDetail = snapshot.latest.ErrorDetail
+	}
+
+	var acted bool
+	if permanent {
+		acted = svc.executePermanentModelFailureGuardDetail(ctx, &latestFailure, rule.WindowMinutes, snapshot.windowTotal, permanentThreshold, failureDetail)
+	} else {
+		acted = svc.executeMatchedRuleAction(ctx, perf, rule, snapshot.ruleCount)
+	}
+
+	if !permanent {
+		// The safeguard threshold may have been crossed while the model freeze held the
+		// claim. Escalate before releasing it; do not require a seventh request.
+		recount, err := svc.countChannelFailureEvents(ctx, ruleKey, windowKey, time.Now().Add(-window))
 		if err != nil {
-			log.Error(ctx, "Failed to resolve channel auto-disable cron schedule",
-				log.Int("channel_id", perf.ChannelID),
-				log.String("cron", rule.DisableUntilCron),
-				log.Cause(err),
-			)
-			return false
-		}
-		expiresAt = &next
-		reason = fmt.Sprintf("Disabled until %s by auto-disable rule after %d consecutive errors",
-			next.Format(time.RFC3339), count)
-	case objects.APIKeyAutoDisableActionTemporary:
-		if rule.DisableDurationMinutes != nil {
-			disabledUntil := time.Now().Add(time.Duration(*rule.DisableDurationMinutes) * time.Minute)
-			expiresAt = &disabledUntil
-			reason = fmt.Sprintf("Temporarily disabled for %d minutes by auto-disable rule after %d consecutive errors", *rule.DisableDurationMinutes, count)
+			log.Error(ctx, "failed to recount channel failure window", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+		} else if recount.windowTotal >= permanentThreshold {
+			escalatedDetail := failureDetail
+			escalatedFailure := latestFailure
+			if recount.latest != nil {
+				escalatedFailure = performanceRecordFromFailureEvent(recount.latest)
+				escalatedDetail = recount.latest.ErrorDetail
+			}
+			escalated := svc.executePermanentModelFailureGuardDetail(ctx, &escalatedFailure, rule.WindowMinutes, recount.windowTotal, permanentThreshold, escalatedDetail)
+			acted = acted || escalated
 		}
 	}
 
-	svc.markChannelUnavailable(ctx, perf.ChannelID, perf.ResponseStatusCode, max(rule.Times, 1), count, expiresAt, reason)
-	return true
+	svc.releaseWindowedRuleAction(perf.ChannelID, windowKey)
+	return acted
 }

@@ -12,11 +12,10 @@ import {
   type ApiKeyAutoDisableRuleFormValue,
   availabilityPoliciesPayload,
   effectiveAutoDisableMode,
-  serializeApiKeyAutoDisableRules,
   toApiKeyAutoDisableRuleFormValues,
 } from '../data/auto-disable';
 import { useUpdateChannel } from '../data/channels';
-import { APIKeyAutoDisableMode, Channel } from '../data/schema';
+import { APIKeyAutoDisableMode, Channel, areApiKeyAutoDisableRulesValid } from '../data/schema';
 import { ApiKeyAutoDisableRulesEditor, ApiKeyAutoDisableRulesPreview } from './api-key-auto-disable-rules-editor';
 
 interface Props {
@@ -50,6 +49,10 @@ export function ChannelsAvailabilityDialog({ open, onOpenChange, currentRow }: P
   const globalEnabled = retryPolicy?.autoDisableChannel?.enabled ?? false;
 
   const onSubmit = useCallback(async () => {
+    if (mode !== 'inherit' && !areApiKeyAutoDisableRulesValid(rules)) {
+      toast.error(t('channels.dialogs.apiKeyRules.validation.invalidRules'));
+      return;
+    }
     const payload = availabilityPoliciesPayload({
       stream: currentPolicies?.stream,
       mode,
@@ -113,7 +116,7 @@ export function ChannelsAvailabilityDialog({ open, onOpenChange, currentRow }: P
 
         {mode === 'custom' && (
           <div className='space-y-4'>
-            <ApiKeyAutoDisableRulesEditor rules={rules} onChange={handleRulesChange} allowDelete />
+            <ApiKeyAutoDisableRulesEditor rules={rules} onChange={handleRulesChange} />
             <Collapsible>
               <CollapsibleTrigger className='text-sm underline-offset-4 hover:underline'>
                 {t('channels.dialogs.availability.custom.fallbackTitle')}
@@ -129,7 +132,7 @@ export function ChannelsAvailabilityDialog({ open, onOpenChange, currentRow }: P
           <div className='space-y-3'>
             <p className='text-muted-foreground text-sm'>{t('channels.dialogs.availability.off.description')}</p>
             <ApiKeyAutoDisableRulesPreview
-              rules={serializeApiKeyAutoDisableRules(rules)}
+              rules={rules}
               emptyLabel={t('channels.dialogs.availability.off.emptySaved')}
               inactiveHint={t('channels.dialogs.availability.off.savedRulesHint')}
             />
@@ -140,7 +143,11 @@ export function ChannelsAvailabilityDialog({ open, onOpenChange, currentRow }: P
           <Button type='button' variant='outline' onClick={() => onOpenChange(false)}>
             {t('common.buttons.cancel')}
           </Button>
-          <Button type='button' disabled={updateChannel.isPending} onClick={onSubmit}>
+          <Button
+            type='button'
+            disabled={updateChannel.isPending || (mode !== 'inherit' && !areApiKeyAutoDisableRulesValid(rules))}
+            onClick={onSubmit}
+          >
             {updateChannel.isPending ? t('common.buttons.saving') : t('common.buttons.save')}
           </Button>
         </DialogFooter>

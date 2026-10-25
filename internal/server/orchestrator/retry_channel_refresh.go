@@ -4,17 +4,19 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
+	"github.com/looplj/axonhub/internal/server/biz"
 )
 
 // errChannelUnavailableForRetry tells the pipeline to stop retrying the current
 // candidate because its channel has left service (deleted, disabled or
-// archived). Spending the remaining same-channel budget on it can only fail, so
-// the pipeline switches to the next candidate instead, or ends the request when
-// there is none.
+// archived), or the requested model has entered cooldown. Spending the
+// remaining same-channel budget on it can only fail, so the pipeline switches
+// to the next candidate instead, or ends the request when there is none.
 var errChannelUnavailableForRetry = errors.New("current channel is no longer available for retry")
 
 // refreshChannelBeforeRetry re-reads the channel state from the database before a
@@ -36,8 +38,9 @@ var errChannelUnavailableForRetry = errors.New("current channel is no longer ava
 //   - the candidate was not in service to begin with: leave it alone, only a
 //     channel that was in service when the candidate was selected can leave it;
 //   - the channel is gone from the database (including soft-deleted), is no longer
-//     enabled, or has no usable credential left while the credential this attempt
-//     used is gone: give up on this candidate so the pipeline switches or fails;
+//     enabled, the requested model is frozen, or has no usable credential left
+//     while the credential this attempt used is gone: give up on this candidate
+//     so the pipeline switches or fails;
 //   - the channel is still enabled, the credential this attempt used carries an
 //     active disable record, and another usable credential remains: rebuild the
 //     candidate from the stored channel, so that retries authenticate with the
@@ -55,37 +58,9 @@ func (p *PersistentOutboundTransformer) refreshChannelBeforeRetry(ctx context.Co
 	}
 
 	candidate := p.state.CurrentCandidate
-	if candidate == nil || candidate.Channel == nil || p.state.ChannelService == nil {
-		return nil
-	}
-
-	// Only a channel that was in service when this candidate was selected can
-	// have left it. A pinned channel that is not enabled is not "leaving"
-	// anything, so the guard stays silent and the retry behaves as upstream.
-	if candidate.Channel.Status != channel.StatusEnabled {
-		return nil
-	}
-
-	client := ent.FromContext(ctx)
-	if client == nil {
-		return nil
-	}
-
-	entity, err := client.Channel.Get(ctx, candidate.Channel.ID)
-	if err != nil {
-		// A soft-deleted channel is filtered out of the normal query, so a
-		// not-found is a confirmed removal: the channel cannot serve anymore.
-		if ent.IsNotFound(err) {
-			return errChannelUnavailableForRetry
-		}
-
-		// Transient lookup failure (permission denied, database hiccup): a degraded
-		// read must never cancel an otherwise legitimate retry.
-		return nil
-	}
-
-	if entity.Status != channel.StatusEnabled {
-		return errChannelUnavailableForRetry
+	entity, err := p.channelStateForRetry(ctx, candidate)
+	if err != nil || entity == nil {
+		return err
 	}
 
 	// A channel that authenticates without any credential has nothing to refresh.
@@ -158,6 +133,43 @@ func (p *PersistentOutboundTransformer) refreshChannelBeforeRetry(ctx context.Co
 	p.wrapped = rebuilt
 
 	return nil
+}
+
+// channelStateForRetry checks the current database state rather than the
+// candidate's pinned snapshot. Both same-channel and cross-channel retries must
+// observe a model freeze committed after candidate selection. OriginalModel is
+// the selection identity; LlmRequest.Model has already become the upstream name.
+// A missing client or a transient lookup failure keeps the existing degraded-read
+// behavior: it must not suppress an otherwise legitimate retry.
+func (p *PersistentOutboundTransformer) channelStateForRetry(ctx context.Context, candidate *ChannelModelsCandidate) (*ent.Channel, error) {
+	if candidate == nil || candidate.Channel == nil || p.state.ChannelService == nil {
+		return nil, nil
+	}
+
+	// Only candidates that were serving when selected can have left service.
+	if candidate.Channel.Status != channel.StatusEnabled {
+		return nil, nil
+	}
+
+	client := ent.FromContext(ctx)
+	if client == nil {
+		return nil, nil
+	}
+
+	entity, err := client.Channel.Get(ctx, candidate.Channel.ID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, errChannelUnavailableForRetry
+		}
+		return nil, nil
+	}
+
+	if entity.Status != channel.StatusEnabled ||
+		(&biz.Channel{Channel: entity}).HasActiveModelCooldown(p.state.OriginalModel, time.Now()) {
+		return nil, errChannelUnavailableForRetry
+	}
+
+	return entity, nil
 }
 
 // currentRetryCredentialRef returns the credential identifier the current attempt

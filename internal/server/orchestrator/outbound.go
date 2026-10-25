@@ -999,18 +999,27 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 	// so it exits promptly and releases its upstream HTTP connection.
 	p.resetPassThroughStreamState()
 
-	p.state.CurrentCandidateIndex++
+	var candidate *ChannelModelsCandidate
+	for {
+		p.state.CurrentCandidateIndex++
+		p.state.CurrentModelIndex = 0
+		if p.state.CurrentCandidateIndex >= len(p.state.ChannelModelsCandidates) {
+			return errors.New("no more candidates available for retry")
+		}
 
-	p.state.CurrentModelIndex = 0
-	if p.state.CurrentCandidateIndex >= len(p.state.ChannelModelsCandidates) {
-		return errors.New("no more candidates available for retry")
+		candidate = p.state.ChannelModelsCandidates[p.state.CurrentCandidateIndex]
+		if _, err := p.channelStateForRetry(ctx, candidate); err == nil {
+			break
+		}
+		// A pinned fallback may have left service or entered model cooldown.
+		// Skipping it is not an upstream attempt and must not consume another
+		// pipeline channel-switch budget or channel selection count.
 	}
 
 	// Reset request execution for the new candidate
 	p.state.RequestExec = nil
 	p.state.PassThroughApplied = false
 
-	candidate := p.state.ChannelModelsCandidates[p.state.CurrentCandidateIndex]
 	p.state.CurrentCandidate = candidate
 	p.state.StreamCompleted = false
 	p.state.OutboundStreamTerminal = streamTerminalNone

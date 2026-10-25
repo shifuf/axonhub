@@ -37,8 +37,7 @@ func newTestChannelService(client *ent.Client) *ChannelService {
 		SystemService:               mockSysSvc,
 		WebhookNotifier:             NewWebhookNotifier(mockSysSvc, httpclient.NewHttpClient()),
 		channelPerfMetrics:          make(map[int]*channelMetrics),
-		apiKeyErrorCounts:           make(map[int]map[string]map[int]int),
-		apiKeyRuleActionsInFlight:   make(map[int]map[string]bool),
+		windowedRuleActionsInFlight: make(map[int]map[string]bool),
 		cancellationWindow:          make(map[int]map[string][]time.Time),
 		cancellationActionsInFlight: make(map[int]map[string]bool),
 		perfWindowSeconds:           600,
@@ -84,72 +83,101 @@ func withGlobalAutoDisable(t *testing.T, svc *ChannelService, ctx context.Contex
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 }
 
-func TestChannelService_GlobalAutoDisableAPIKey(t *testing.T) {
+func legacyRuleCounterKey(perf *PerformanceRecord, scope autoDisableScope, index int, rule objects.APIKeyAutoDisableRule) string {
+	effective := effectiveModelFreezeRule(rule)
+	return apiKeyRuleCounterKey(autoDisableRuleIdentity(perf, effective), scope, index, effective)
+}
+
+func requireLegacyRuleModelCooldown(t *testing.T, ch *ent.Channel, model string, minutes int) objects.ModelCooldown {
+	t.Helper()
+	require.Equal(t, channel.StatusEnabled, ch.Status)
+	require.Empty(t, ch.DisabledAPIKeys)
+	require.Nil(t, ch.AutoDisabledAt)
+	require.Nil(t, ch.AutoDisableExpiresAt)
+	require.Len(t, ch.ModelCooldowns, 1)
+	cooldown := ch.ModelCooldowns[0]
+	require.Equal(t, model, cooldown.Model)
+	require.True(t, cooldown.IsActive())
+	require.NotNil(t, cooldown.ExpiresAt)
+	require.WithinDuration(t, time.Now().Add(time.Duration(minutes)*time.Minute), *cooldown.ExpiresAt, 5*time.Second)
+	require.True(t, buildChannel(ch, nil).HasActiveModelCooldown(model, time.Now()))
+	return cooldown
+}
+
+func TestChannelService_GlobalAutoDisableModelSharesAPIKeyFailures(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
-
 	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
 	svc := newTestChannelService(client)
 	ch := createTestChannelWithAPIKeys(t, client, ctx, "test-channel", []string{"key1", "key2", "key3"})
 	withGlobalAutoDisable(t, svc, ctx, ch, []objects.APIKeyAutoDisableRule{{
-		StatusCodes: []int{401},
-		Times:       3,
-		Action:      objects.APIKeyAutoDisableActionPermanent,
+		StatusCodes: []int{401}, Times: 3, Action: objects.APIKeyAutoDisableActionPermanent,
 	}})
-
-	perf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401}
-
-	_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
-	require.False(t, acted)
-	_, acted = svc.evaluateAutoDisableForFailure(ctx, perf)
-	require.False(t, acted)
-	_, acted = svc.evaluateAutoDisableForFailure(ctx, perf)
-	require.True(t, acted)
-
-	updatedCh, err := client.Channel.Get(ctx, ch.ID)
-	require.NoError(t, err)
-	require.Len(t, updatedCh.DisabledAPIKeys, 1)
-	require.Equal(t, "key1", updatedCh.DisabledAPIKeys[0].Key)
-	require.Nil(t, updatedCh.DisabledAPIKeys[0].ExpiresAt)
-
-	_, acted = svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 500,
+	for i, key := range []string{"key1", "key2", "key3"} {
+		matched, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
+			ChannelID: ch.ID, Model: "gpt-4", APIKey: key, ResponseStatusCode: 401,
+		})
+		require.True(t, matched)
+		require.Equal(t, i == 2, acted)
+		updated, err := client.Channel.Get(ctx, ch.ID)
+		require.NoError(t, err)
+		require.Equal(t, channel.StatusEnabled, updated.Status)
+		require.Empty(t, updated.DisabledAPIKeys)
+		require.Equal(t, ch.Credentials, updated.Credentials)
+		if i < 2 {
+			require.Empty(t, updated.ModelCooldowns)
+		} else {
+			requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
+		}
+	}
+	matched, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 500,
 	})
-	require.False(t, acted)
-
-	_, acted = svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key2", ResponseStatusCode: 401,
-	})
+	require.False(t, matched)
 	require.False(t, acted)
 }
 
-func TestChannelService_GlobalAutoDisableKeylessChannel(t *testing.T) {
+func TestChannelService_GlobalAutoDisableKeylessModel(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
-
 	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
 	svc := newTestChannelService(client)
 	ch := createTestChannelWithAPIKeys(t, client, ctx, "test-channel-no-keys", []string{})
 	withGlobalAutoDisable(t, svc, ctx, ch, []objects.APIKeyAutoDisableRule{{
-		StatusCodes: []int{401},
-		Times:       2,
-		Action:      objects.APIKeyAutoDisableActionPermanent,
+		StatusCodes: []int{401}, Times: 2, Action: objects.APIKeyAutoDisableActionPermanent,
 	}})
-
-	perf := &PerformanceRecord{ChannelID: ch.ID, ResponseStatusCode: 401}
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", ResponseStatusCode: 401}
 	_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
 	require.False(t, acted)
-
 	_, acted = svc.evaluateAutoDisableForFailure(ctx, perf)
 	require.True(t, acted)
-
-	time.Sleep(100 * time.Millisecond)
-	updatedCh, err := client.Channel.Get(ctx, ch.ID)
+	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Equal(t, channel.StatusDisabled, updatedCh.Status)
-	require.NotNil(t, updatedCh.ErrorMessage)
-	require.NotNil(t, updatedCh.AutoDisabledAt)
-	require.Nil(t, updatedCh.AutoDisableExpiresAt)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
+	require.Empty(t, updated.Credentials.GetAllCredentialRefs())
+}
+
+func TestChannelService_LegacyAutoDisableWithoutModelDoesNotAct(t *testing.T) {
+	for _, key := range []string{"key1", ""} {
+		t.Run(fmt.Sprintf("keyed=%v", key != ""), func(t *testing.T) {
+			rule := objects.APIKeyAutoDisableRule{StatusCodes: []int{401}, Times: 1, Action: objects.APIKeyAutoDisableActionPermanentDelete}
+			ctx, svc, ch := newWindowRuleTestService(t, rule)
+			for range 6 {
+				matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
+					ChannelID: ch.ID, APIKey: key, ResponseStatusCode: 401,
+				})
+				require.True(t, matched)
+				require.False(t, acted)
+			}
+			updated, err := svc.db.Channel.Get(ctx, ch.ID)
+			require.NoError(t, err)
+			require.Equal(t, channel.StatusEnabled, updated.Status)
+			require.Empty(t, updated.DisabledAPIKeys)
+			require.Empty(t, updated.ModelCooldowns)
+			require.Equal(t, ch.Credentials, updated.Credentials)
+			require.Zero(t, countChannelFailureEventsByChannelForTest(t, svc, ch.ID))
+		})
+	}
 }
 
 func TestChannelService_markChannelUnavailable_RefreshesStaleLocalCacheWhenAlreadyDisabled(t *testing.T) {
@@ -285,120 +313,81 @@ func TestChannelService_DisableAllAPIKeysNotifiesWebhook(t *testing.T) {
 	}
 }
 
-func TestChannelService_SuccessClearsErrorCounts(t *testing.T) {
-	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
-	defer client.Close()
-
-	ctx := context.Background()
-	ctx = ent.NewContext(ctx, client)
-	ctx = authz.WithTestBypass(ctx)
-
-	svc := newTestChannelService(client)
-
-	ch := createTestChannelWithAPIKeys(t, client, ctx, "test-channel", []string{"key1"})
-	rule := objects.APIKeyAutoDisableRule{
-		StatusCodes: []int{401},
-		Times:       3,
-		Action:      objects.APIKeyAutoDisableActionPermanent,
+func TestChannelService_SuccessRetainsErrorWindows(t *testing.T) {
+	rule := objects.APIKeyAutoDisableRule{StatusCodes: []int{401}, Times: 3, Action: objects.APIKeyAutoDisableActionPermanent}
+	ctx, svc, ch := newWindowRuleTestService(t, rule)
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 401}
+	for range 2 {
+		_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
+		require.False(t, acted)
 	}
-	ruleKey := apiKeyRuleCounterKey("key1", autoDisableScopeGlobal, 0, rule)
-	svc.apiKeyErrorCounts = map[int]map[string]map[int]int{
-		ch.ID: {ruleKey: {0: 2}},
-	}
-
-	// Record a successful request
-	perf := &PerformanceRecord{
-		ChannelID:        ch.ID,
-		APIKey:           "key1",
-		Success:          true,
-		RequestCompleted: true,
-		EndTime:          time.Now(),
-	}
-
-	svc.IncrementChannelSelection(ch.ID)
-	svc.RecordPerformance(ctx, perf)
-
-	// Verify API key error counts are cleared
-	svc.apiKeyErrorCountsLock.Lock()
-	_, keyExists := svc.apiKeyErrorCounts[ch.ID][ruleKey]
-	svc.apiKeyErrorCountsLock.Unlock()
-	require.False(t, keyExists)
-}
-
-func TestChannelService_KeylessSuccessClearsOnlyKeylessCounters(t *testing.T) {
-	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
-	defer client.Close()
-
-	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
-	svc := newTestChannelService(client)
-	ch := createTestChannelWithAPIKeys(t, client, ctx, "mixed-identity", []string{"key1"})
-	rule := objects.APIKeyAutoDisableRule{
-		StatusCodes: []int{429},
-		Times:       3,
-		Action:      objects.APIKeyAutoDisableActionPermanent,
-	}
-	keyedKey := apiKeyRuleCounterKey("key1", autoDisableScopeGlobal, 0, rule)
-	keylessKey := apiKeyRuleCounterKey(fmt.Sprintf("channel:%d", ch.ID), autoDisableScopeGlobal, 0, rule)
-	svc.apiKeyErrorCounts = map[int]map[string]map[int]int{
-		ch.ID: {
-			keyedKey:   {0: 2},
-			keylessKey: {0: 2},
-		},
-	}
-
 	now := time.Now()
 	svc.IncrementChannelSelection(ch.ID)
 	svc.RecordPerformance(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, Success: true, RequestCompleted: true, StartTime: now, EndTime: now,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key2", Success: true,
+		RequestCompleted: true, StartTime: now, EndTime: now,
 	})
+	key := legacyRuleCounterKey(perf, autoDisableScopeChannel, 0, rule)
+	pending, _ := countChannelFailureEventsForTest(t, svc, key, channelFailureWindowKeyForTest(perf, rule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(rule).WindowMinutes)*time.Minute))
+	require.Equal(t, 2, pending, "success on any credential must retain the shared model window")
+	_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
+	require.True(t, acted)
+	updated, err := svc.db.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
+}
 
-	svc.apiKeyErrorCountsLock.Lock()
-	defer svc.apiKeyErrorCountsLock.Unlock()
-	require.NotContains(t, svc.apiKeyErrorCounts[ch.ID], keylessKey)
-	require.Equal(t, 2, svc.apiKeyErrorCounts[ch.ID][keyedKey][0])
+func TestChannelService_KeylessSuccessRetainsAllModelWindows(t *testing.T) {
+	rule := objects.APIKeyAutoDisableRule{StatusCodes: []int{429}, Times: 3, Action: objects.APIKeyAutoDisableActionPermanent}
+	ctx, svc, ch := newWindowRuleTestService(t, rule)
+	keyed := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429}
+	keyless := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4o", ResponseStatusCode: 429}
+	for range 2 {
+		for _, perf := range []*PerformanceRecord{keyed, keyless} {
+			_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
+			require.False(t, acted)
+		}
+	}
+	now := time.Now()
+	svc.IncrementChannelSelection(ch.ID)
+	svc.RecordPerformance(ctx, &PerformanceRecord{
+		ChannelID: ch.ID, Model: "gpt-4", Success: true, RequestCompleted: true, StartTime: now, EndTime: now,
+	})
+	keyedCount, _ := countChannelFailureEventsForTest(t, svc, legacyRuleCounterKey(keyed, autoDisableScopeChannel, 0, rule), channelFailureWindowKeyForTest(keyed, rule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(rule).WindowMinutes)*time.Minute))
+	keylessCount, _ := countChannelFailureEventsForTest(t, svc, legacyRuleCounterKey(keyless, autoDisableScopeChannel, 0, rule), channelFailureWindowKeyForTest(keyless, rule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(rule).WindowMinutes)*time.Minute))
+	require.Equal(t, 2, keyedCount)
+	require.Equal(t, 2, keylessCount)
+	_, acted := svc.evaluateAutoDisableForFailure(ctx, keyed)
+	require.True(t, acted)
+	updated, err := svc.db.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
+	require.False(t, buildChannel(updated, nil).HasActiveModelCooldown("gpt-4o", time.Now()))
 }
 
 func TestChannelService_MultipleStatusCodes(t *testing.T) {
-	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
-	defer client.Close()
-
-	ctx := context.Background()
-	ctx = ent.NewContext(ctx, client)
-	ctx = authz.WithTestBypass(ctx)
-
-	svc := newTestChannelService(client)
-
-	ch := createTestChannelWithAPIKeys(t, client, ctx, "test-channel", []string{"key1", "key2"})
-	withGlobalAutoDisable(t, svc, ctx, ch, []objects.APIKeyAutoDisableRule{
-		{StatusCodes: []int{401}, Times: 2, Action: objects.APIKeyAutoDisableActionPermanent},
-		{StatusCodes: []int{403}, Times: 1, Action: objects.APIKeyAutoDisableActionPermanent},
-	})
-
-	_, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401,
-	})
-	require.False(t, acted)
-	_, acted = svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401,
-	})
-	require.True(t, acted)
-
-	_, err := client.Channel.UpdateOneID(ch.ID).
-		SetDisabledAPIKeys([]objects.DisabledAPIKey{}).
-		Save(ctx)
-	require.NoError(t, err)
-	svc.apiKeyErrorCounts = make(map[int]map[string]map[int]int)
-
-	_, acted = svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key2", ResponseStatusCode: 403,
-	})
-	require.True(t, acted)
-
-	// Verify key2 is disabled
-	updatedCh, err := client.Channel.Get(ctx, ch.ID)
-	require.NoError(t, err)
-	require.Len(t, updatedCh.DisabledAPIKeys, 1)
-	require.Equal(t, "key2", updatedCh.DisabledAPIKeys[0].Key)
+	for _, tt := range []struct{ code, threshold int }{{401, 2}, {403, 1}} {
+		t.Run(fmt.Sprint(tt.code), func(t *testing.T) {
+			client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
+			defer client.Close()
+			ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
+			svc := newTestChannelService(client)
+			ch := createTestChannelWithAPIKeys(t, client, ctx, "status-rules", []string{"key1", "key2"})
+			withGlobalAutoDisable(t, svc, ctx, ch, []objects.APIKeyAutoDisableRule{
+				{StatusCodes: []int{401}, Times: 2, Action: objects.APIKeyAutoDisableActionPermanent},
+				{StatusCodes: []int{403}, Times: 1, Action: objects.APIKeyAutoDisableActionPermanent},
+			})
+			for i := 1; i <= tt.threshold; i++ {
+				_, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
+					ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: tt.code,
+				})
+				require.Equal(t, i == tt.threshold, acted)
+			}
+			updated, err := client.Channel.Get(ctx, ch.ID)
+			require.NoError(t, err)
+			requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
+		})
+	}
 }
 
 func TestChannelService_ConcurrentErrorTracking(t *testing.T) {
@@ -421,17 +410,23 @@ func TestChannelService_ConcurrentErrorTracking(t *testing.T) {
 	// Simulate concurrent error reporting
 	var wg sync.WaitGroup
 
-	numGoroutines := 10
+	numGoroutines := 5
+	panics := make(chan any, numGoroutines)
 
 	for i := range numGoroutines {
 		wg.Add(1)
 
 		go func(idx int) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panics <- r
+				}
+			}()
 
 			perf := &PerformanceRecord{
-				ChannelID:          ch.ID,
-				APIKey:             "key1",
+				ChannelID: ch.ID, Model: "gpt-4",
+				APIKey:             fmt.Sprintf("key%d", idx%3+1),
 				ResponseStatusCode: 401,
 				Success:            false,
 			}
@@ -441,13 +436,15 @@ func TestChannelService_ConcurrentErrorTracking(t *testing.T) {
 
 	wg.Wait()
 
-	// Verify counts are tracked correctly (should be at least 5 to trigger disable)
-	// The key should be disabled since we had 10 errors and threshold is 5
-	updatedCh, err := client.Channel.Get(ctx, ch.ID)
+	close(panics)
+	for recovered := range panics {
+		t.Fatalf("concurrent failure tracking panicked: %v", recovered)
+	}
+	// Five shared failures trigger the normal rule, not the sixth-failure guard.
+	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-
-	// Should have disabled key1
-	require.GreaterOrEqual(t, len(updatedCh.DisabledAPIKeys), 1)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
+	require.Equal(t, ch.Credentials, updated.Credentials)
 }
 
 func TestChannelService_DisableAPIKeyIdempotent(t *testing.T) {
@@ -582,11 +579,16 @@ func TestNormalizeAPIKeyAutoDisableRules(t *testing.T) {
 	require.NoError(t, NormalizeAPIKeyAutoDisableRules(policies))
 	require.Equal(t, []int{401, 429}, policies.APIKeyAutoDisableRules[0].StatusCodes)
 	require.Equal(t, []string{"quota"}, policies.APIKeyAutoDisableRules[0].KeywordPatterns)
+	require.True(t, policies.APIKeyAutoDisableRules[0].FreezeModel)
+	require.Equal(t, defaultAutoDisableWindowMinutes, policies.APIKeyAutoDisableRules[0].WindowMinutes)
+	defaults := &objects.ChannelPolicies{APIKeyAutoDisableRules: []objects.APIKeyAutoDisableRule{{Times: 1, Action: objects.APIKeyAutoDisableActionTemporary}}}
+	require.NoError(t, NormalizeAPIKeyAutoDisableRules(defaults))
+	require.NotNil(t, defaults.APIKeyAutoDisableRules[0].DisableDurationMinutes)
+	require.Equal(t, defaultAutoDisableCooldownMinutes, *defaults.APIKeyAutoDisableRules[0].DisableDurationMinutes)
 
 	invalidDuration := 0
 	tests := []objects.APIKeyAutoDisableRule{
 		{Times: 0, Action: objects.APIKeyAutoDisableActionTemporary},
-		{Times: 1, Action: objects.APIKeyAutoDisableActionTemporary},
 		{StatusCodes: []int{99}, Times: 1, Action: objects.APIKeyAutoDisableActionTemporary},
 		{Times: 1, Action: "unsupported"},
 		{Times: 1, Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: &invalidDuration},
@@ -598,7 +600,7 @@ func TestNormalizeAPIKeyAutoDisableRules(t *testing.T) {
 	}
 }
 
-func TestChannelService_ChannelAPIKeyRuleTemporaryDisableAfterThreshold(t *testing.T) {
+func TestChannelService_ChannelAPIKeyRuleTemporaryModelCooldownAfterThreshold(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -619,7 +621,7 @@ func TestChannelService_ChannelAPIKeyRuleTemporaryDisableAfterThreshold(t *testi
 	require.NoError(t, err)
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
-	perf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 429}
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429}
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
 	require.True(t, matched)
 	require.False(t, acted)
@@ -629,13 +631,11 @@ func TestChannelService_ChannelAPIKeyRuleTemporaryDisableAfterThreshold(t *testi
 
 	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.DisabledAPIKeys, 1)
-	require.Equal(t, "key1", updated.DisabledAPIKeys[0].Key)
-	require.NotNil(t, updated.DisabledAPIKeys[0].ExpiresAt)
-	require.WithinDuration(t, time.Now().Add(30*time.Minute), *updated.DisabledAPIKeys[0].ExpiresAt, 5*time.Second)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", duration)
+	require.Equal(t, ch.Credentials, updated.Credentials)
 }
 
-func TestChannelService_ChannelAPIKeyRulePermanentActionKeepsLastKeyDisabled(t *testing.T) {
+func TestChannelService_ChannelAPIKeyRuleLegacyDeleteKeepsLastKeyAndFreezesModel(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -655,17 +655,15 @@ func TestChannelService_ChannelAPIKeyRulePermanentActionKeepsLastKeyDisabled(t *
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "only-key", ResponseStatusCode: 401,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "only-key", ResponseStatusCode: 401,
 	})
 	require.True(t, matched)
 	require.True(t, acted)
 
 	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Equal(t, channel.StatusDisabled, updated.Status)
-	require.Equal(t, []string{"only-key"}, updated.Credentials.APIKeys)
-	require.Len(t, updated.DisabledAPIKeys, 1)
-	require.Nil(t, updated.DisabledAPIKeys[0].ExpiresAt)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
+	require.Equal(t, ch.Credentials, updated.Credentials)
 }
 
 func TestChannelService_ChannelAPIKeyRuleCountsAlternatingStatusesTogether(t *testing.T) {
@@ -690,24 +688,24 @@ func TestChannelService_ChannelAPIKeyRuleCountsAlternatingStatusesTogether(t *te
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 401,
 	})
 	require.True(t, matched)
 	require.False(t, acted)
 
 	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 403,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 403,
 	})
 	require.True(t, matched)
 	require.True(t, acted)
 
 	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.DisabledAPIKeys, 1)
-	require.Equal(t, "key1", updated.DisabledAPIKeys[0].Key)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", duration)
+	require.Equal(t, ch.Credentials, updated.Credentials)
 }
 
-func TestChannelService_ChannelAPIKeyRuleKeepsStreakAfterNonMatchingFailure(t *testing.T) {
+func TestChannelService_ChannelAPIKeyRuleKeepsWindowAfterNonMatchingFailure(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -729,22 +727,26 @@ func TestChannelService_ChannelAPIKeyRuleKeepsStreakAfterNonMatchingFailure(t *t
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 401,
 	})
 	require.True(t, matched)
 	require.False(t, acted)
 
 	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 500,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 500,
 	})
 	require.False(t, matched)
 	require.False(t, acted)
 
 	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 401,
 	})
 	require.True(t, matched)
 	require.True(t, acted)
+
+	updated, err := client.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", duration)
 }
 
 func TestChannelService_ChannelAPIKeyRuleKeepsIndependentCounters(t *testing.T) {
@@ -775,25 +777,29 @@ func TestChannelService_ChannelAPIKeyRuleKeepsIndependentCounters(t *testing.T) 
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 403,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 403,
 	})
 	require.True(t, matched)
 	require.False(t, acted)
 
 	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 401,
 	})
 	require.True(t, matched)
 	require.False(t, acted)
 
 	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 403,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 403,
 	})
 	require.True(t, matched)
 	require.True(t, acted)
+
+	updated, err := client.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", duration)
 }
 
-func TestChannelService_ChannelAPIKeyRuleEditStartsNewStreak(t *testing.T) {
+func TestChannelService_ChannelAPIKeyRuleEditStartsNewWindow(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -814,7 +820,7 @@ func TestChannelService_ChannelAPIKeyRuleEditStartsNewStreak(t *testing.T) {
 	require.NoError(t, err)
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
-	perf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 429}
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429}
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
 	require.True(t, matched)
 	require.False(t, acted)
@@ -836,9 +842,16 @@ func TestChannelService_ChannelAPIKeyRuleEditStartsNewStreak(t *testing.T) {
 	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
 	require.True(t, matched)
 	require.False(t, acted)
+
+	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
+	require.True(t, matched)
+	require.True(t, acted)
+	updated, err := client.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", editedDuration)
 }
 
-func TestChannelService_ChannelAPIKeyRuleKeepsStreakWhenActionFails(t *testing.T) {
+func TestChannelService_ChannelAPIKeyRuleKeepsWindowWhenActionFails(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
 	svc := newTestChannelService(client)
@@ -856,23 +869,31 @@ func TestChannelService_ChannelAPIKeyRuleKeepsStreakWhenActionFails(t *testing.T
 		Save(ctx)
 	require.NoError(t, err)
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
-	require.NoError(t, client.Close())
+	// Fail only the cooldown write, not the failure-event persistence: the
+	// window must survive a failed action and be retried on the next failure.
+	svc.db.Channel.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(mutationCtx context.Context, mutation ent.Mutation) (ent.Value, error) {
+			return nil, fmt.Errorf("simulated cooldown write failure")
+		})
+	})
 
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 429,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429,
 	})
 	require.True(t, matched)
 	require.False(t, acted)
 
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429}
+	rule0 := ch.Policies.APIKeyAutoDisableRules[0]
+	key := legacyRuleCounterKey(perf, autoDisableScopeChannel, 0, rule0)
+	count, _ := countChannelFailureEventsForTest(t, svc, key, channelFailureWindowKeyForTest(perf, rule0), time.Now().Add(-time.Duration(effectiveModelFreezeRule(rule0).WindowMinutes)*time.Minute))
+	require.Equal(t, 1, count)
 	svc.apiKeyErrorCountsLock.Lock()
 	defer svc.apiKeyErrorCountsLock.Unlock()
-	require.Len(t, svc.apiKeyErrorCounts[ch.ID], 1)
-	for _, countsByStatus := range svc.apiKeyErrorCounts[ch.ID] {
-		require.Equal(t, 1, countsByStatus[0])
-	}
+	require.Empty(t, svc.windowedRuleActionsInFlight[ch.ID])
 }
 
-func TestChannelService_RemovedAPIKeyRuleDoesNotRestoreOldStreak(t *testing.T) {
+func TestChannelService_RemovedAPIKeyRuleDoesNotCountUnmatchedFailures(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -892,7 +913,7 @@ func TestChannelService_RemovedAPIKeyRuleDoesNotRestoreOldStreak(t *testing.T) {
 	require.NoError(t, err)
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
-	perf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 429}
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429}
 	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
 	require.True(t, matched)
 	require.False(t, acted)
@@ -909,6 +930,13 @@ func TestChannelService_RemovedAPIKeyRuleDoesNotRestoreOldStreak(t *testing.T) {
 	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
 	require.True(t, matched)
 	require.True(t, acted)
+
+	updated, err := client.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", duration)
+	key := legacyRuleCounterKey(perf, autoDisableScopeChannel, 0, rule)
+	count, _ := countChannelFailureEventsForTest(t, svc, key, channelFailureWindowKeyForTest(perf, rule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(rule).WindowMinutes)*time.Minute))
+	require.Equal(t, 2, count, "removed rules must not count unmatched failures")
 }
 
 func TestChannelService_ChannelAPIKeyRuleDoesNotStartConcurrentAction(t *testing.T) {
@@ -931,34 +959,40 @@ func TestChannelService_ChannelAPIKeyRuleDoesNotStartConcurrentAction(t *testing
 	require.NoError(t, err)
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
-	ruleKey := apiKeyRuleCounterKey("key1", autoDisableScopeChannel, 0, rule)
-	svc.apiKeyRuleActionsInFlight[ch.ID] = map[string]bool{ruleKey: false}
-
-	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 429,
-	})
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429}
+	effective := effectiveModelFreezeRule(rule)
+	ruleKey := legacyRuleCounterKey(perf, autoDisableScopeChannel, 0, rule)
+	windowKey := fmt.Sprintf("%s:window:%d", autoDisableRuleIdentity(perf, effective), effective.WindowMinutes)
+	svc.windowedRuleActionsInFlight = map[int]map[string]bool{ch.ID: {windowKey: true}}
+	matched, acted := svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
 	require.True(t, matched)
 	require.False(t, acted)
-
+	pending, _ := countChannelFailureEventsForTest(t, svc, ruleKey, windowKey, time.Now().Add(-time.Duration(effective.WindowMinutes)*time.Minute))
 	svc.apiKeyErrorCountsLock.Lock()
-	require.Equal(t, 1, svc.apiKeyErrorCounts[ch.ID][ruleKey][0])
-	streakReset, stillInFlight := svc.apiKeyRuleActionsInFlight[ch.ID][ruleKey]
-	require.True(t, stillInFlight)
-	require.False(t, streakReset)
+	inFlight := svc.windowedRuleActionsInFlight[ch.ID][windowKey]
 	svc.apiKeyErrorCountsLock.Unlock()
+	require.Equal(t, 1, pending)
+	require.True(t, inFlight)
 
 	now := time.Now()
+	svc.IncrementChannelSelection(ch.ID)
 	svc.RecordPerformance(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", StartTime: now, EndTime: now,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key2", StartTime: now, EndTime: now,
 		Success: true, RequestCompleted: true,
 	})
-
+	pending, _ = countChannelFailureEventsForTest(t, svc, ruleKey, windowKey, time.Now().Add(-time.Duration(effective.WindowMinutes)*time.Minute))
 	svc.apiKeyErrorCountsLock.Lock()
-	defer svc.apiKeyErrorCountsLock.Unlock()
-	require.NotContains(t, svc.apiKeyErrorCounts[ch.ID], ruleKey)
-	streakReset, stillInFlight = svc.apiKeyRuleActionsInFlight[ch.ID][ruleKey]
-	require.True(t, stillInFlight)
-	require.True(t, streakReset)
+	inFlight = svc.windowedRuleActionsInFlight[ch.ID][windowKey]
+	delete(svc.windowedRuleActionsInFlight[ch.ID], windowKey)
+	svc.apiKeyErrorCountsLock.Unlock()
+	require.Equal(t, 1, pending, "success must not remove failures while an action is in flight")
+	require.True(t, inFlight)
+	matched, acted = svc.checkAndHandleChannelAPIKeyRules(ctx, perf)
+	require.True(t, matched)
+	require.True(t, acted)
+	updated, err := client.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", duration)
 }
 
 func TestEffectiveAutoDisableMode(t *testing.T) {
@@ -999,7 +1033,7 @@ func TestNormalizeAPIKeyAutoDisableRules_Mode(t *testing.T) {
 	require.Len(t, off.APIKeyAutoDisableRules, 1)
 }
 
-func TestChannelService_InheritTemporaryDisable(t *testing.T) {
+func TestChannelService_InheritTemporaryModelCooldownAndCleanup(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -1016,7 +1050,7 @@ func TestChannelService_InheritTemporaryDisable(t *testing.T) {
 
 	now := time.Now()
 	perf := &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 429,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429,
 		RequestCompleted: true, StartTime: now, EndTime: now,
 	}
 	svc.IncrementChannelSelection(ch.ID)
@@ -1026,23 +1060,18 @@ func TestChannelService_InheritTemporaryDisable(t *testing.T) {
 
 	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.DisabledAPIKeys, 1)
-	require.Equal(t, "key1", updated.DisabledAPIKeys[0].Key)
-	require.NotNil(t, updated.DisabledAPIKeys[0].ExpiresAt)
-	require.WithinDuration(t, time.Now().Add(30*time.Minute), *updated.DisabledAPIKeys[0].ExpiresAt, 5*time.Second)
-	require.Nil(t, updated.AutoDisableExpiresAt)
-
+	cooldown := requireLegacyRuleModelCooldown(t, updated, "gpt-4", duration)
 	elapsed := time.Now().Add(-time.Minute)
-	expired := updated.DisabledAPIKeys[0]
-	expired.ExpiresAt = &elapsed
-	_, err = client.Channel.UpdateOneID(ch.ID).SetDisabledAPIKeys([]objects.DisabledAPIKey{expired}).Save(ctx)
+	cooldown.ExpiresAt = &elapsed
+	_, err = client.Channel.UpdateOneID(ch.ID).SetModelCooldowns([]objects.ModelCooldown{cooldown}).Save(ctx)
 	require.NoError(t, err)
 	svc.cleanupExpiredDisabledAPIKeys(ctx)
-
 	recovered, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
 	require.Empty(t, recovered.DisabledAPIKeys)
+	require.Empty(t, recovered.ModelCooldowns)
 	require.Equal(t, channel.StatusEnabled, recovered.Status)
+	require.Equal(t, ch.Credentials, recovered.Credentials)
 }
 
 func TestChannelService_CustomAndGlobalCountersAreIndependent(t *testing.T) {
@@ -1076,34 +1105,46 @@ func TestChannelService_CustomAndGlobalCountersAreIndependent(t *testing.T) {
 	}))
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
-	quotaPerf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 429, ErrorMessage: "quota exceeded"}
+	quotaPerf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 429, ErrorMessage: "quota exceeded"}
 	matched, acted := svc.evaluateAutoDisableForFailure(ctx, quotaPerf)
 	require.True(t, matched)
 	require.False(t, acted)
 
-	authPerf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401}
+	authPerf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 401}
 	matched, acted = svc.evaluateAutoDisableForFailure(ctx, authPerf)
 	require.True(t, matched)
 	require.False(t, acted)
 
-	channelKey := apiKeyRuleCounterKey("key1", autoDisableScopeChannel, 0, ch.Policies.APIKeyAutoDisableRules[0])
-	globalKey := apiKeyRuleCounterKey("key1", autoDisableScopeGlobal, 0, objects.APIKeyAutoDisableRule{
-		StatusCodes: []int{401}, Times: 3, Action: objects.APIKeyAutoDisableActionPermanent,
-	})
-	svc.apiKeyErrorCountsLock.Lock()
-	require.Equal(t, 1, svc.apiKeyErrorCounts[ch.ID][channelKey][0])
-	require.Equal(t, 1, svc.apiKeyErrorCounts[ch.ID][globalKey][0])
-	svc.apiKeyErrorCountsLock.Unlock()
+	channelKey := legacyRuleCounterKey(quotaPerf, autoDisableScopeChannel, 0, ch.Policies.APIKeyAutoDisableRules[0])
+	globalRule := objects.APIKeyAutoDisableRule{StatusCodes: []int{401}, Times: 3, Action: objects.APIKeyAutoDisableActionPermanent}
+	globalKey := legacyRuleCounterKey(authPerf, autoDisableScopeGlobal, 0, globalRule)
+	channelRule := ch.Policies.APIKeyAutoDisableRules[0]
+	channelCount, _ := countChannelFailureEventsForTest(t, svc, channelKey, channelFailureWindowKeyForTest(quotaPerf, channelRule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(channelRule).WindowMinutes)*time.Minute))
+	globalCount, _ := countChannelFailureEventsForTest(t, svc, globalKey, channelFailureWindowKeyForTest(authPerf, globalRule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(globalRule).WindowMinutes)*time.Minute))
+	require.Equal(t, 1, channelCount)
+	require.Equal(t, 1, globalCount)
 
 	now := time.Now()
 	svc.IncrementChannelSelection(ch.ID)
 	svc.RecordPerformance(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", Success: true, RequestCompleted: true, StartTime: now, EndTime: now,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", Success: true, RequestCompleted: true, StartTime: now, EndTime: now,
 	})
-	svc.apiKeyErrorCountsLock.Lock()
-	defer svc.apiKeyErrorCountsLock.Unlock()
-	require.NotContains(t, svc.apiKeyErrorCounts[ch.ID], channelKey)
-	require.NotContains(t, svc.apiKeyErrorCounts[ch.ID], globalKey)
+	channelCount, _ = countChannelFailureEventsForTest(t, svc, channelKey, channelFailureWindowKeyForTest(quotaPerf, channelRule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(channelRule).WindowMinutes)*time.Minute))
+	globalCount, _ = countChannelFailureEventsForTest(t, svc, globalKey, channelFailureWindowKeyForTest(authPerf, globalRule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(globalRule).WindowMinutes)*time.Minute))
+	require.Equal(t, 1, channelCount)
+	require.Equal(t, 1, globalCount)
+
+	// This failure matches both layers; the custom rule must own it exclusively.
+	matched, acted = svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key2", ResponseStatusCode: 401, ErrorMessage: "quota exceeded",
+	})
+	require.True(t, matched)
+	require.True(t, acted)
+	globalCount, _ = countChannelFailureEventsForTest(t, svc, globalKey, channelFailureWindowKeyForTest(authPerf, globalRule), time.Now().Add(-time.Duration(effectiveModelFreezeRule(globalRule).WindowMinutes)*time.Minute))
+	require.Equal(t, 1, globalCount)
+	updated, err := client.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	requireLegacyRuleModelCooldown(t, updated, "gpt-4", defaultAutoDisableCooldownMinutes)
 }
 
 func TestChannelService_OffModeDoesNotCountOrDisable(t *testing.T) {
@@ -1137,18 +1178,20 @@ func TestChannelService_OffModeDoesNotCountOrDisable(t *testing.T) {
 	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil)})
 
 	matched, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, APIKey: "key1", ResponseStatusCode: 401,
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 401,
 	})
 	require.False(t, matched)
 	require.False(t, acted)
-	require.Empty(t, svc.apiKeyErrorCounts[ch.ID])
+	require.Zero(t, countChannelFailureEventsByChannelForTest(t, svc, ch.ID))
 
 	updated, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
 	require.Empty(t, updated.DisabledAPIKeys)
+	require.Empty(t, updated.ModelCooldowns)
+	require.Equal(t, channel.StatusEnabled, updated.Status)
 }
 
-func TestChannelService_KeylessTemporaryDisableAndCleanup(t *testing.T) {
+func TestChannelService_KeylessTemporaryModelCooldownAndCleanup(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 
@@ -1166,24 +1209,22 @@ func TestChannelService_KeylessTemporaryDisableAndCleanup(t *testing.T) {
 	now := time.Now()
 	svc.IncrementChannelSelection(ch.ID)
 	svc.RecordPerformance(ctx, &PerformanceRecord{
-		ChannelID: ch.ID, ResponseStatusCode: 429, RequestCompleted: true, StartTime: now, EndTime: now,
+		ChannelID: ch.ID, Model: "gpt-4", ResponseStatusCode: 429, RequestCompleted: true, StartTime: now, EndTime: now,
 	})
 
-	disabled, err := client.Channel.Get(ctx, ch.ID)
+	frozen, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Equal(t, channel.StatusDisabled, disabled.Status)
-	require.NotNil(t, disabled.AutoDisabledAt)
-	require.NotNil(t, disabled.AutoDisableExpiresAt)
-	require.WithinDuration(t, time.Now().Add(30*time.Minute), *disabled.AutoDisableExpiresAt, 5*time.Second)
-
+	cooldown := requireLegacyRuleModelCooldown(t, frozen, "gpt-4", duration)
 	elapsed := time.Now().Add(-time.Minute)
-	_, err = client.Channel.UpdateOneID(ch.ID).SetAutoDisableExpiresAt(elapsed).Save(ctx)
+	cooldown.ExpiresAt = &elapsed
+	_, err = client.Channel.UpdateOneID(ch.ID).SetModelCooldowns([]objects.ModelCooldown{cooldown}).Save(ctx)
 	require.NoError(t, err)
 	svc.cleanupExpiredDisabledAPIKeys(ctx)
-
 	recovered, err := client.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
 	require.Equal(t, channel.StatusEnabled, recovered.Status)
+	require.Empty(t, recovered.ModelCooldowns)
+	require.Empty(t, recovered.DisabledAPIKeys)
 	require.Nil(t, recovered.AutoDisabledAt)
 	require.Nil(t, recovered.AutoDisableExpiresAt)
 	require.Nil(t, recovered.ErrorMessage)

@@ -179,26 +179,44 @@ export const apiKeyAutoDisableRuleSchema = z.object({
   statusCodes: z.array(z.number().int().min(100).max(599)).optional().nullable(),
   keywordPatterns: z.array(z.string()).optional().nullable(),
   times: z.number().int().min(1),
-  action: apiKeyAutoDisableActionSchema,
-  disableDurationMinutes: z.number().int().positive().optional().nullable(),
+  // Retain legacy wire enums and accept an unset action while upgrading old policies.
+  action: z.preprocess((value) => (value == null || value === '' ? 'temporary_disable' : value), apiKeyAutoDisableActionSchema),
+  disableDurationMinutes: z.number().int().min(0).optional().nullable(),
   disableUntilCron: z.string().optional().nullable(),
   disableUntilTimezone: z.string().optional().nullable(),
+  windowMinutes: z.number().int().min(0).max(10080).optional().nullable(),
+  freezeModel: z.boolean().optional().nullable(),
 });
 export type APIKeyAutoDisableRule = z.infer<typeof apiKeyAutoDisableRuleSchema>;
 
+// The read schema accepts legacy values; live forms must already be canonical.
+// Do not normalize here: clearing a number or entering 0 must block submission.
 export const apiKeyAutoDisableRuleFormSchema = apiKeyAutoDisableRuleSchema
+  .extend({ action: apiKeyAutoDisableActionSchema })
   .refine((rule) => (rule.statusCodes?.length ?? 0) > 0 || (rule.keywordPatterns?.some((pattern) => pattern.trim() !== '') ?? false), {
     message: 'At least one status code or keyword pattern is required',
     path: ['statusCodes'],
   })
-  .refine((rule) => rule.action !== 'temporary_disable' || (rule.disableDurationMinutes ?? 0) > 0, {
-    message: 'Temporary disable requires a duration',
+  .refine((rule) => rule.action === 'temporary_disable', {
+    message: 'Automatic rules only support temporary model cooldowns',
+    path: ['action'],
+  })
+  .refine((rule) => (rule.disableDurationMinutes ?? 0) >= 1, {
+    message: 'Model cooldown requires a positive duration',
     path: ['disableDurationMinutes'],
   })
-  .refine((rule) => rule.action !== 'disable_until_cron' || (rule.disableUntilCron ?? '').trim() !== '', {
-    message: 'Scheduled recovery requires a cron expression',
-    path: ['disableUntilCron'],
+  .refine((rule) => (rule.windowMinutes ?? 0) >= 1, {
+    message: 'Automatic rules require a positive rolling failure window',
+    path: ['windowMinutes'],
+  })
+  .refine((rule) => rule.freezeModel === true, {
+    message: 'Automatic rules must only freeze the original request model',
+    path: ['freezeModel'],
   });
+
+export function areApiKeyAutoDisableRulesValid(rules: readonly unknown[]): boolean {
+  return rules.every((rule) => apiKeyAutoDisableRuleFormSchema.safeParse(rule).success);
+}
 
 export const channelPoliciesSchema = z.object({
   stream: capabilityPolicySchema.optional(),
@@ -897,7 +915,9 @@ export const createChannelInputSchema = z
   })
   .superRefine((data, ctx) => {
     const hasApiKey = data.credentials.apiKey && data.credentials.apiKey.trim().length > 0;
-    const hasApiKeys = false;
+    // Flat apiKeys remain a valid credential for backward-compatible writes; the dialog
+    // itself submits keyGroups, but legacy payloads must not be rejected here.
+    const hasApiKeys = data.credentials.apiKeys && data.credentials.apiKeys.some((k) => k.trim().length > 0);
     const hasKeyGroups = (data.credentials.keyGroups || []).some((group) =>
       (group.apiKeys || []).some((key) => (key || '').trim().length > 0)
     );
@@ -931,6 +951,13 @@ export const createChannelInputSchema = z
         code: 'custom' as const,
         message: 'At least one API Key is required',
         path: ['credentials', 'keyGroups'],
+      });
+      // Also surface the legacy flat-apiKeys path so older payloads and tests keep
+      // pointing at the field they actually sent.
+      ctx.addIssue({
+        code: 'custom' as const,
+        message: 'At least one API Key is required',
+        path: ['credentials', 'apiKeys'],
       });
     }
 
@@ -1030,7 +1057,8 @@ export const updateChannelInputSchema = z
       effectiveType === 'xai_subscription';
 
         const isCopilotKey = hasApiKey && data.credentials?.apiKey?.trim().startsWith('{');
-    const isThirdPartyCodex = effectiveType === 'codex' && hasKeyGroups;
+    // Third-party Codex is detected from either a flat apiKeys row or a key group.
+    const isThirdPartyCodex = effectiveType === 'codex' && (hasApiKeys || hasKeyGroups);
 
     if (!isThirdPartyCodex && (isOAuthType || isCopilotKey) && data.credentials?.apiKey) {
       validateOAuthCredentials(effectiveType || 'github_copilot', data.credentials.apiKey, ctx);

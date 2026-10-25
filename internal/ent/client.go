@@ -18,6 +18,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/apikey"
 	"github.com/looplj/axonhub/internal/ent/apikeyprofiletemplate"
 	"github.com/looplj/axonhub/internal/ent/channel"
+	"github.com/looplj/axonhub/internal/ent/channelfailureevent"
 	"github.com/looplj/axonhub/internal/ent/channelmodelprice"
 	"github.com/looplj/axonhub/internal/ent/channelmodelpriceversion"
 	"github.com/looplj/axonhub/internal/ent/channeloverridetemplate"
@@ -53,6 +54,8 @@ type Client struct {
 	APIKeyProfileTemplate *APIKeyProfileTemplateClient
 	// Channel is the client for interacting with the Channel builders.
 	Channel *ChannelClient
+	// ChannelFailureEvent is the client for interacting with the ChannelFailureEvent builders.
+	ChannelFailureEvent *ChannelFailureEventClient
 	// ChannelModelPrice is the client for interacting with the ChannelModelPrice builders.
 	ChannelModelPrice *ChannelModelPriceClient
 	// ChannelModelPriceVersion is the client for interacting with the ChannelModelPriceVersion builders.
@@ -113,6 +116,7 @@ func (c *Client) init() {
 	c.APIKey = NewAPIKeyClient(c.config)
 	c.APIKeyProfileTemplate = NewAPIKeyProfileTemplateClient(c.config)
 	c.Channel = NewChannelClient(c.config)
+	c.ChannelFailureEvent = NewChannelFailureEventClient(c.config)
 	c.ChannelModelPrice = NewChannelModelPriceClient(c.config)
 	c.ChannelModelPriceVersion = NewChannelModelPriceVersionClient(c.config)
 	c.ChannelOverrideTemplate = NewChannelOverrideTemplateClient(c.config)
@@ -230,6 +234,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		APIKey:                   NewAPIKeyClient(cfg),
 		APIKeyProfileTemplate:    NewAPIKeyProfileTemplateClient(cfg),
 		Channel:                  NewChannelClient(cfg),
+		ChannelFailureEvent:      NewChannelFailureEventClient(cfg),
 		ChannelModelPrice:        NewChannelModelPriceClient(cfg),
 		ChannelModelPriceVersion: NewChannelModelPriceVersionClient(cfg),
 		ChannelOverrideTemplate:  NewChannelOverrideTemplateClient(cfg),
@@ -274,6 +279,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		APIKey:                   NewAPIKeyClient(cfg),
 		APIKeyProfileTemplate:    NewAPIKeyProfileTemplateClient(cfg),
 		Channel:                  NewChannelClient(cfg),
+		ChannelFailureEvent:      NewChannelFailureEventClient(cfg),
 		ChannelModelPrice:        NewChannelModelPriceClient(cfg),
 		ChannelModelPriceVersion: NewChannelModelPriceVersionClient(cfg),
 		ChannelOverrideTemplate:  NewChannelOverrideTemplateClient(cfg),
@@ -325,12 +331,12 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.APIKey, c.APIKeyProfileTemplate, c.Channel, c.ChannelModelPrice,
-		c.ChannelModelPriceVersion, c.ChannelOverrideTemplate, c.ChannelProbe,
-		c.DataStorage, c.Invitation, c.Model, c.OIDCIdentity, c.Project, c.Prompt,
-		c.PromptProtectionRule, c.ProviderQuotaStatus, c.Request, c.RequestExecution,
-		c.Role, c.System, c.Thread, c.Trace, c.UsageLog, c.User, c.UserProject,
-		c.UserRole,
+		c.APIKey, c.APIKeyProfileTemplate, c.Channel, c.ChannelFailureEvent,
+		c.ChannelModelPrice, c.ChannelModelPriceVersion, c.ChannelOverrideTemplate,
+		c.ChannelProbe, c.DataStorage, c.Invitation, c.Model, c.OIDCIdentity,
+		c.Project, c.Prompt, c.PromptProtectionRule, c.ProviderQuotaStatus, c.Request,
+		c.RequestExecution, c.Role, c.System, c.Thread, c.Trace, c.UsageLog, c.User,
+		c.UserProject, c.UserRole,
 	} {
 		n.Use(hooks...)
 	}
@@ -340,12 +346,12 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.APIKey, c.APIKeyProfileTemplate, c.Channel, c.ChannelModelPrice,
-		c.ChannelModelPriceVersion, c.ChannelOverrideTemplate, c.ChannelProbe,
-		c.DataStorage, c.Invitation, c.Model, c.OIDCIdentity, c.Project, c.Prompt,
-		c.PromptProtectionRule, c.ProviderQuotaStatus, c.Request, c.RequestExecution,
-		c.Role, c.System, c.Thread, c.Trace, c.UsageLog, c.User, c.UserProject,
-		c.UserRole,
+		c.APIKey, c.APIKeyProfileTemplate, c.Channel, c.ChannelFailureEvent,
+		c.ChannelModelPrice, c.ChannelModelPriceVersion, c.ChannelOverrideTemplate,
+		c.ChannelProbe, c.DataStorage, c.Invitation, c.Model, c.OIDCIdentity,
+		c.Project, c.Prompt, c.PromptProtectionRule, c.ProviderQuotaStatus, c.Request,
+		c.RequestExecution, c.Role, c.System, c.Thread, c.Trace, c.UsageLog, c.User,
+		c.UserProject, c.UserRole,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -360,6 +366,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.APIKeyProfileTemplate.mutate(ctx, m)
 	case *ChannelMutation:
 		return c.Channel.mutate(ctx, m)
+	case *ChannelFailureEventMutation:
+		return c.ChannelFailureEvent.mutate(ctx, m)
 	case *ChannelModelPriceMutation:
 		return c.ChannelModelPrice.mutate(ctx, m)
 	case *ChannelModelPriceVersionMutation:
@@ -971,6 +979,139 @@ func (c *ChannelClient) mutate(ctx context.Context, m *ChannelMutation) (Value, 
 		return (&ChannelDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown Channel mutation op: %q", m.Op())
+	}
+}
+
+// ChannelFailureEventClient is a client for the ChannelFailureEvent schema.
+type ChannelFailureEventClient struct {
+	config
+}
+
+// NewChannelFailureEventClient returns a client for the ChannelFailureEvent from the given config.
+func NewChannelFailureEventClient(c config) *ChannelFailureEventClient {
+	return &ChannelFailureEventClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `channelfailureevent.Hooks(f(g(h())))`.
+func (c *ChannelFailureEventClient) Use(hooks ...Hook) {
+	c.hooks.ChannelFailureEvent = append(c.hooks.ChannelFailureEvent, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `channelfailureevent.Intercept(f(g(h())))`.
+func (c *ChannelFailureEventClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ChannelFailureEvent = append(c.inters.ChannelFailureEvent, interceptors...)
+}
+
+// Create returns a builder for creating a ChannelFailureEvent entity.
+func (c *ChannelFailureEventClient) Create() *ChannelFailureEventCreate {
+	mutation := newChannelFailureEventMutation(c.config, OpCreate)
+	return &ChannelFailureEventCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ChannelFailureEvent entities.
+func (c *ChannelFailureEventClient) CreateBulk(builders ...*ChannelFailureEventCreate) *ChannelFailureEventCreateBulk {
+	return &ChannelFailureEventCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ChannelFailureEventClient) MapCreateBulk(slice any, setFunc func(*ChannelFailureEventCreate, int)) *ChannelFailureEventCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ChannelFailureEventCreateBulk{err: fmt.Errorf("calling to ChannelFailureEventClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ChannelFailureEventCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ChannelFailureEventCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ChannelFailureEvent.
+func (c *ChannelFailureEventClient) Update() *ChannelFailureEventUpdate {
+	mutation := newChannelFailureEventMutation(c.config, OpUpdate)
+	return &ChannelFailureEventUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ChannelFailureEventClient) UpdateOne(_m *ChannelFailureEvent) *ChannelFailureEventUpdateOne {
+	mutation := newChannelFailureEventMutation(c.config, OpUpdateOne, withChannelFailureEvent(_m))
+	return &ChannelFailureEventUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ChannelFailureEventClient) UpdateOneID(id int) *ChannelFailureEventUpdateOne {
+	mutation := newChannelFailureEventMutation(c.config, OpUpdateOne, withChannelFailureEventID(id))
+	return &ChannelFailureEventUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ChannelFailureEvent.
+func (c *ChannelFailureEventClient) Delete() *ChannelFailureEventDelete {
+	mutation := newChannelFailureEventMutation(c.config, OpDelete)
+	return &ChannelFailureEventDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ChannelFailureEventClient) DeleteOne(_m *ChannelFailureEvent) *ChannelFailureEventDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ChannelFailureEventClient) DeleteOneID(id int) *ChannelFailureEventDeleteOne {
+	builder := c.Delete().Where(channelfailureevent.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ChannelFailureEventDeleteOne{builder}
+}
+
+// Query returns a query builder for ChannelFailureEvent.
+func (c *ChannelFailureEventClient) Query() *ChannelFailureEventQuery {
+	return &ChannelFailureEventQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeChannelFailureEvent},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ChannelFailureEvent entity by its id.
+func (c *ChannelFailureEventClient) Get(ctx context.Context, id int) (*ChannelFailureEvent, error) {
+	return c.Query().Where(channelfailureevent.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ChannelFailureEventClient) GetX(ctx context.Context, id int) *ChannelFailureEvent {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ChannelFailureEventClient) Hooks() []Hook {
+	return c.hooks.ChannelFailureEvent
+}
+
+// Interceptors returns the client interceptors.
+func (c *ChannelFailureEventClient) Interceptors() []Interceptor {
+	return c.inters.ChannelFailureEvent
+}
+
+func (c *ChannelFailureEventClient) mutate(ctx context.Context, m *ChannelFailureEventMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ChannelFailureEventCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ChannelFailureEventUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ChannelFailureEventUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ChannelFailureEventDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ChannelFailureEvent mutation op: %q", m.Op())
 	}
 }
 
@@ -4799,14 +4940,14 @@ func (c *UserRoleClient) mutate(ctx context.Context, m *UserRoleMutation) (Value
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		APIKey, APIKeyProfileTemplate, Channel, ChannelModelPrice,
+		APIKey, APIKeyProfileTemplate, Channel, ChannelFailureEvent, ChannelModelPrice,
 		ChannelModelPriceVersion, ChannelOverrideTemplate, ChannelProbe, DataStorage,
 		Invitation, Model, OIDCIdentity, Project, Prompt, PromptProtectionRule,
 		ProviderQuotaStatus, Request, RequestExecution, Role, System, Thread, Trace,
 		UsageLog, User, UserProject, UserRole []ent.Hook
 	}
 	inters struct {
-		APIKey, APIKeyProfileTemplate, Channel, ChannelModelPrice,
+		APIKey, APIKeyProfileTemplate, Channel, ChannelFailureEvent, ChannelModelPrice,
 		ChannelModelPriceVersion, ChannelOverrideTemplate, ChannelProbe, DataStorage,
 		Invitation, Model, OIDCIdentity, Project, Prompt, PromptProtectionRule,
 		ProviderQuotaStatus, Request, RequestExecution, Role, System, Thread, Trace,

@@ -71,7 +71,9 @@ test('a third-party Codex channel with a synthetic plain key fetches models with
   const authJSONThirdParty = getFetchModelsApiKey({ type: 'codex', authMode: 'third-party', oauthApiKey: AUTH_JSON, apiKeys: ['sk-synthetic-third-party'] });
   assert.equal(authJSONThirdParty, 'sk-synthetic-third-party', 'auth.json must not leak when the row is switched to third-party');
 
-  const fetch = between('const handleFetchModels = useCallback', 'const handleSyncNow = useCallback');
+  // The fork fetches models per key group; each probe must still go through the
+  // shared credential choice so third-party Codex never uses an inherited OAuth JSON.
+  const fetch = between('const handleFetchModelsForGroup = useCallback', 'const handleSyncNow = useCallback');
   assert.match(fetch, /getFetchModelsApiKey\(\{/, 'fetch-models must go through the shared credential choice');
 });
 

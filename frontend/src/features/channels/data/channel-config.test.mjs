@@ -7,7 +7,8 @@ const dataDir = import.meta.dirname;
 const srcRoot = join(dataDir, '..', '..', '..');
 
 function read(relativePath) {
-  return readFileSync(join(srcRoot, relativePath), 'utf8');
+  // Normalize CRLF so structural regexes below work on Windows checkouts too.
+  return readFileSync(join(srcRoot, relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 function parseLocale(locale) {

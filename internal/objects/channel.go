@@ -867,14 +867,11 @@ const (
 	APIKeyAutoDisableActionUntilCron APIKeyAutoDisableAction = "disable_until_cron"
 )
 
-// APIKeyAutoDisableRule applies to one channel and matches status codes and/or
-// error-message patterns. Empty conditions match any upstream error.
-//
-// Rules act on a single credential. Channels holding several API keys disable
-// only the failing key and keep serving on the rest; the channel itself is
-// disabled once every credential is unavailable, and recovers as soon as one
-// becomes available again. An OAuth channel has exactly one credential
-// (OAuthCredentialRef), so for it the two levels coincide.
+// APIKeyAutoDisableRule retains its historical wire name for compatibility.
+// Automatic actions always count failures per channel/original-request-model
+// in a rolling window and temporarily freeze that model. They never disable
+// credentials; the sixth failure in the same pair/window permanently disables
+// the whole channel as the sole escalation exception.
 type APIKeyAutoDisableRule struct {
 	StatusCodes     []int                   `json:"statusCodes,omitempty"`
 	KeywordPatterns []string                `json:"keywordPatterns,omitempty"`
@@ -882,7 +879,7 @@ type APIKeyAutoDisableRule struct {
 	Action          APIKeyAutoDisableAction `json:"action"`
 
 	// DisableDurationMinutes applies to APIKeyAutoDisableActionTemporary. A nil
-	// value disables the credential indefinitely.
+	// value is upgraded to the default 30-minute model cooldown.
 	DisableDurationMinutes *int `json:"disableDurationMinutes,omitempty"`
 
 	// DisableUntilCron and DisableUntilTimezone apply to
@@ -890,6 +887,14 @@ type APIKeyAutoDisableRule struct {
 	// 5-field crontab format; an empty timezone means UTC.
 	DisableUntilCron     string `json:"disableUntilCron,omitempty"`
 	DisableUntilTimezone string `json:"disableUntilTimezone,omitempty"`
+
+	// WindowMinutes is the rolling failure window. Zero/missing legacy values
+	// upgrade to 10 minutes; successful requests do not clear it.
+	WindowMinutes int `json:"windowMinutes,omitempty"`
+
+	// FreezeModel is retained for legacy GraphQL/backup compatibility and is
+	// always canonicalized to true, even when stored as false or omitted.
+	FreezeModel bool `json:"freezeModel,omitempty"`
 }
 
 // ParseOverrideOperations parses the override parameters string.

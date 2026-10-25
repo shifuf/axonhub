@@ -80,6 +80,8 @@ function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChann
                   upstreamModelID
                   format
                   status
+                  responseStatusCode
+                  errorMessage
                   reasoningEffort
                   passThroughApplied${executionChannelFields}
                 }

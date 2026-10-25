@@ -123,6 +123,7 @@ const RETRY_POLICY_QUERY = `
       }
       autoDisableChannel {
         enabled
+        permanentFailureThreshold
         rules {
           statusCodes
           keywordPatterns
@@ -131,6 +132,8 @@ const RETRY_POLICY_QUERY = `
           disableDurationMinutes
           disableUntilCron
           disableUntilTimezone
+          windowMinutes
+          freezeModel
         }
       }
     }
@@ -334,6 +337,7 @@ export interface GcCleanupPreviewItem {
 export interface AutoDisableChannel {
   enabled: boolean;
   rules: APIKeyAutoDisableRule[];
+  permanentFailureThreshold: number;
 }
 
 export interface WebhookHeader {
@@ -384,6 +388,7 @@ export interface UpstreamErrorPolicy {
 export interface AutoDisableChannelInput {
   enabled?: boolean;
   rules?: APIKeyAutoDisableRule[];
+  permanentFailureThreshold?: number;
 }
 
 export type ClientCancellationAction = 'switch_and_cooldown' | 'cooldown_only' | 'cooldown_model';
@@ -1299,6 +1304,8 @@ export interface BackupPayload {
   success: boolean;
   data?: string;
   message?: string;
+  // Whether the backup archive was also uploaded to configured external storage.
+  uploaded?: boolean;
 }
 
 export interface RestoreOptionsInput {

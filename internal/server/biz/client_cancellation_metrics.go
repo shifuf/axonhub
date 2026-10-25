@@ -3,27 +3,23 @@ package biz
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/looplj/axonhub/internal/log"
 )
 
-// evaluateClientCancellationForFailure records the cancellation timestamp in a
-// sliding window and applies the configured cooldown when at least Threshold
-// cancellations happened within the last WindowMinutes. It never participates
-// in HTTP status-code retry decisions.
+// evaluateClientCancellationForFailure records eligible cancellations in a
+// sliding window per channel, original request model, project and window size.
+// It is independent of HTTP errors and the permanent-channel failure breaker.
 func (svc *ChannelService) evaluateClientCancellationForFailure(ctx context.Context, perf *PerformanceRecord) bool {
-	if perf == nil || perf.ChannelID <= 0 || !perf.Canceled {
+	if perf == nil || perf.ChannelID <= 0 || !perf.Canceled || strings.TrimSpace(perf.Model) == "" {
 		return false
 	}
 
-	// Only streaming cancellations AFTER the upstream produced something count.
-	// A non-stream request that dies with context.Canceled is always a client-
-	// side abort (proxy/CDN timeout or user giving up) that happened before the
-	// single response could arrive — it says nothing about the channel and must
-	// not feed the cooldown. For streams, first-token evidence proves the
-	// upstream was already delivering when the client hung up.
+	// A non-stream abort or a stream that never received a first token says
+	// nothing about the upstream channel. Preserve that eligibility boundary.
 	if !perf.Stream || perf.FirstTokenTime == nil {
 		return false
 	}
@@ -37,49 +33,32 @@ func (svc *ChannelService) evaluateClientCancellationForFailure(ctx context.Cont
 	threshold := max(policy.Threshold, 1)
 	windowMinutes := max(policy.WindowMinutes, 1)
 	cooldownMinutes := max(policy.CooldownMinutes, 1)
-	identity := cancellationCounterIdentity(perf)
-	counterKey := fmt.Sprintf(
-		"%s:project:%d:threshold:%d:window:%d:cooldown:%d:action:%s",
-		identity,
-		perf.ProjectID,
-		threshold,
-		windowMinutes,
-		cooldownMinutes,
-		policy.Action,
-	)
-	// Model-scoped cooldowns count per (channel, model): cancellations of one
-	// model must not push another model on the same channel into cooldown.
-	if policy.Action == ClientCancellationActionCooldownModel && perf.Model != "" {
-		counterKey += ":model:" + perf.Model
-	}
-
-	now := time.Now()
-	windowStart := now.Add(-time.Duration(windowMinutes) * time.Minute)
+	// Credentials, action, threshold and cooldown duration do not partition the
+	// evidence. All keys serving the same pair/project/window share one count.
+	counterKey := fmt.Sprintf("%s:project:%d:window:%d", cancellationCounterIdentity(perf), perf.ProjectID, windowMinutes)
 
 	svc.apiKeyErrorCountsLock.Lock()
+	// Timestamp after taking the lock so concurrent append order is chronological.
+	now := time.Now()
+	svc.pruneClientCancellationWindowsLocked(now, 0)
 	if svc.cancellationWindow[perf.ChannelID] == nil {
 		svc.cancellationWindow[perf.ChannelID] = make(map[string][]time.Time)
 	}
-	if svc.cancellationActionsInFlight[perf.ChannelID] == nil {
-		svc.cancellationActionsInFlight[perf.ChannelID] = make(map[string]bool)
-	}
-	// Drop timestamps that fell out of the sliding window, then append.
+	// Keeping the latest threshold samples is sufficient to decide whether at
+	// least threshold cancellations remain in the window. A hot, frozen pair
+	// must not accumulate an unbounded timestamp slice.
 	timestamps := svc.cancellationWindow[perf.ChannelID][counterKey]
-	recent := timestamps[:0]
-	for _, ts := range timestamps {
-		if ts.After(windowStart) {
-			recent = append(recent, ts)
-		}
+	if len(timestamps) >= threshold {
+		timestamps = append(timestamps[:0], timestamps[len(timestamps)-threshold+1:]...)
 	}
-	recent = append(recent, now)
-	svc.cancellationWindow[perf.ChannelID][counterKey] = recent
-	count := len(recent)
-	_, actionInFlight := svc.cancellationActionsInFlight[perf.ChannelID][counterKey]
-	shouldAct := count >= threshold && !actionInFlight
+	timestamps = append(timestamps, now)
+	svc.cancellationWindow[perf.ChannelID][counterKey] = timestamps
+	count := len(timestamps)
+	shouldAct := count >= threshold && !svc.cancellationActionsInFlight[perf.ChannelID][counterKey]
 	if shouldAct {
-		// The triggering window is consumed: keep the timestamps so an operator
-		// can still see the burst, but stop counting towards a new action until
-		// the window has drained.
+		if svc.cancellationActionsInFlight[perf.ChannelID] == nil {
+			svc.cancellationActionsInFlight[perf.ChannelID] = make(map[string]bool)
+		}
 		svc.cancellationActionsInFlight[perf.ChannelID][counterKey] = true
 	}
 	svc.apiKeyErrorCountsLock.Unlock()
@@ -91,24 +70,19 @@ func (svc *ChannelService) evaluateClientCancellationForFailure(ctx context.Cont
 	acted := svc.executeClientCancellationCooldown(ctx, perf, count, windowMinutes, cooldownMinutes, policy.Action)
 
 	svc.apiKeyErrorCountsLock.Lock()
-	if svc.cancellationActionsInFlight[perf.ChannelID] != nil {
-		delete(svc.cancellationActionsInFlight[perf.ChannelID], counterKey)
-		if len(svc.cancellationActionsInFlight[perf.ChannelID]) == 0 {
-			delete(svc.cancellationActionsInFlight, perf.ChannelID)
-		}
+	delete(svc.cancellationActionsInFlight[perf.ChannelID], counterKey)
+	if len(svc.cancellationActionsInFlight[perf.ChannelID]) == 0 {
+		delete(svc.cancellationActionsInFlight, perf.ChannelID)
 	}
-	if acted && svc.cancellationWindow[perf.ChannelID] != nil {
-		// Window consumed by the triggered action; start fresh.
-		delete(svc.cancellationWindow[perf.ChannelID], counterKey)
-		if len(svc.cancellationWindow[perf.ChannelID]) == 0 {
-			delete(svc.cancellationWindow, perf.ChannelID)
-		}
-	}
+	// A freeze never consumes its evidence. Another cancellation in the same
+	// rolling window can still trigger after expiry/manual unfreeze, while the
+	// model-freeze helper preserves an already-active freeze's original expiry.
 	svc.apiKeyErrorCountsLock.Unlock()
 
 	if acted {
-		log.Warn(ctx, "channel credential entered cancellation cooldown",
+		log.Warn(ctx, "channel model entered cancellation cooldown",
 			log.Int("channel_id", perf.ChannelID),
+			log.String("model", perf.Model),
 			log.Int("project_id", perf.ProjectID),
 			log.Int("threshold", threshold),
 			log.Int("cooldown_minutes", cooldownMinutes),
@@ -125,77 +99,66 @@ func (svc *ChannelService) executeClientCancellationCooldown(
 	count int,
 	windowMinutes int,
 	cooldownMinutes int,
-	action string,
+	_ string,
 ) bool {
-	expiresAt := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
-	reason := fmt.Sprintf(
-		"Client cancellation cooldown: %d cancellations within %d minutes, auto-recover after %d minutes",
-		max(count, 1),
-		windowMinutes,
-		cooldownMinutes,
-	)
-
-	// cooldown_model freezes only the (channel, model) pair that produced the
-	// cancellations: the channel stays enabled and keeps serving its other models,
-	// and the frozen model recovers automatically or via manual unfreeze.
-	if action == ClientCancellationActionCooldownModel && perf.Model != "" {
-		return svc.markChannelModelCooldown(ctx, perf.ChannelID, perf.Model, count, windowMinutes, cooldownMinutes)
-	}
-
-	// switch_and_cooldown takes the whole channel out of the candidate pool so
-	// the next request is routed to a different channel during the cooldown.
-	//
-	// cooldown_only keeps the rest of a multi-credential channel usable and only
-	// cools down the credential that served the canceled request; the channel is
-	// disabled by DisableAPIKey once no credential is left.
-	if action == ClientCancellationActionSwitchAndCooldown || perf.APIKey == "" {
-		svc.markChannelUnavailable(ctx, perf.ChannelID, 0, max(count, 1), count, &expiresAt, reason)
-		return true
-	}
-
-	if err := svc.DisableAPIKey(ctx, perf.ChannelID, perf.APIKey, 0, reason, &expiresAt); err != nil {
-		log.Error(ctx, "Failed to temporarily disable API key after client cancellations",
-			log.Int("channel_id", perf.ChannelID),
-			log.Cause(err),
-		)
-
+	// Never broaden a missing model into a credential or whole-channel action,
+	// even when called directly with an old, empty or otherwise invalid action.
+	if perf == nil || perf.ChannelID <= 0 || strings.TrimSpace(perf.Model) == "" {
 		return false
 	}
 
-	return true
+	return svc.markChannelModelCooldown(ctx, perf.ChannelID, perf.Model, count, windowMinutes, cooldownMinutes)
 }
 
-// clearCancellationCountsOnSuccess resets the sliding windows of the identity
-// that succeeded: a successful request proves the (channel[, key][, model])
-// path works, so its pending cancellation burst must not trigger a cooldown.
+// clearCancellationCountsOnSuccess is retained for the performance-recording
+// hook, but a success is not an eraser for the cancellation rolling window.
+// Only already-expired evidence is eligible for garbage collection.
 func (svc *ChannelService) clearCancellationCountsOnSuccess(perf *PerformanceRecord) {
 	if perf == nil || perf.ChannelID <= 0 {
 		return
 	}
 
-	identity := cancellationCounterIdentity(perf)
-	// counterKey layout is "<identity>:project:<id>:threshold:...[:model:<m>]".
-	// Matching on "<identity>:project:<id>:" clears every policy-shape window of
-	// this identity (any threshold/window/action and any model), so a success
-	// wipes the whole pending burst.
-	prefix := fmt.Sprintf("%s:project:%d:", identity, perf.ProjectID)
-
 	svc.apiKeyErrorCountsLock.Lock()
 	defer svc.apiKeyErrorCountsLock.Unlock()
+	svc.pruneClientCancellationWindowsLocked(time.Now(), perf.ChannelID)
+}
 
-	for key := range svc.cancellationWindow[perf.ChannelID] {
-		if strings.HasPrefix(key, prefix) {
-			delete(svc.cancellationWindow[perf.ChannelID], key)
+// pruneClientCancellationWindowsLocked requires apiKeyErrorCountsLock. A zero
+// channelID sweeps idle identities across channels on cancellation traffic;
+// success only needs to prune its own channel. These maps are in-memory only.
+func (svc *ChannelService) pruneClientCancellationWindowsLocked(now time.Time, channelID int) {
+	for id, windows := range svc.cancellationWindow {
+		if channelID > 0 && id != channelID {
+			continue
 		}
-	}
-	if len(svc.cancellationWindow[perf.ChannelID]) == 0 {
-		delete(svc.cancellationWindow, perf.ChannelID)
+		for key, timestamps := range windows {
+			// The window is the final key segment; quoted original model names
+			// may contain arbitrary delimiters without colliding with it.
+			windowMinutes := maxClientCancellationCooldownMinutes
+			if i := strings.LastIndex(key, ":window:"); i >= 0 {
+				if minutes, err := strconv.Atoi(key[i+len(":window:"):]); err == nil {
+					windowMinutes = min(max(minutes, 1), maxClientCancellationCooldownMinutes)
+				}
+			}
+			windowStart := now.Add(-time.Duration(windowMinutes) * time.Minute)
+			recent := timestamps[:0]
+			for _, ts := range timestamps {
+				if ts.After(windowStart) {
+					recent = append(recent, ts)
+				}
+			}
+			if len(recent) == 0 {
+				delete(windows, key)
+			} else {
+				windows[key] = recent
+			}
+		}
+		if len(windows) == 0 {
+			delete(svc.cancellationWindow, id)
+		}
 	}
 }
 
 func cancellationCounterIdentity(perf *PerformanceRecord) string {
-	if perf.APIKey != "" {
-		return perf.APIKey
-	}
-	return fmt.Sprintf("channel:%d", perf.ChannelID)
+	return fmt.Sprintf("model:%q", perf.Model)
 }

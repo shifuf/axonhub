@@ -16,6 +16,7 @@ import (
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xcache"
 	"github.com/looplj/axonhub/internal/server/biz"
+	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/pipeline"
 	"github.com/looplj/axonhub/llm/pipeline/stream"
@@ -44,7 +45,7 @@ func createCancellationTestChannel(t *testing.T, ctx context.Context, client *en
 		SetName(name).
 		SetBaseURL("https://api.openai.com/v1").
 		SetCredentials(objects.ChannelCredentials{APIKeys: keys}).
-		SetSupportedModels([]string{"gpt-4"}).
+		SetSupportedModels([]string{"gpt-4", "gpt-4o"}).
 		SetDefaultTestModel("gpt-4").
 		SetStatus(channel.StatusEnabled).
 		Save(ctx)
@@ -177,25 +178,79 @@ func (e *cancellationTestEnv) getChannel(t *testing.T, id int) *ent.Channel {
 	return row
 }
 
-// waitForStatus polls until the channel reaches the wanted status, because the
-// performance record is recorded by the asynchronous worker.
-func (e *cancellationTestEnv) waitForStatus(t *testing.T, id int, want channel.Status) *ent.Channel {
+// waitForModelCooldown observes the async performance worker's model-scoped
+// write. A channel remaining enabled alone is not evidence of a cooldown.
+func (e *cancellationTestEnv) waitForModelCooldown(t *testing.T, before *ent.Channel, model string, minutes int) *ent.Channel {
 	t.Helper()
 
-	var last *ent.Channel
-
+	var row *ent.Channel
+	var freeze objects.ModelCooldown
 	require.Eventually(t, func() bool {
-		row, err := e.client.Channel.Get(e.ctx, id)
+		current, err := e.client.Channel.Get(e.ctx, before.ID)
 		if err != nil {
 			return false
 		}
-
-		last = row
-
-		return row.Status == want
+		for _, cooldown := range current.ModelCooldowns {
+			if cooldown.Model == model && cooldown.IsActive() {
+				row, freeze = current, cooldown
+				return true
+			}
+		}
+		return false
 	}, 5*time.Second, 20*time.Millisecond)
 
-	return last
+	require.Equal(t, channel.StatusEnabled, row.Status)
+	require.Equal(t, before.Credentials, row.Credentials, "cancellations must not delete or replace keys")
+	require.Equal(t, before.DisabledAPIKeys, row.DisabledAPIKeys, "cancellations must not disable keys")
+	require.Nil(t, row.AutoDisabledAt)
+	require.Nil(t, row.AutoDisableExpiresAt)
+	require.Nil(t, row.ErrorMessage)
+	require.Len(t, row.ModelCooldowns, 1)
+	require.NotNil(t, freeze.ExpiresAt, "client cancellation freezes must be temporary")
+	require.WithinDuration(t, time.Now().Add(time.Duration(minutes)*time.Minute), *freeze.ExpiresAt, 2*time.Second)
+	require.Contains(t, freeze.Reason, "Client cancellation cooldown")
+
+	return row
+}
+
+func (e *cancellationTestEnv) requireModelOnlyCandidateSelection(t *testing.T, frozenChannelID int) {
+	t.Helper()
+
+	// The serving cache must retain both enabled channels and receive the model
+	// freeze written by the worker; channel disappearance is never acceptable.
+	require.Eventually(t, func() bool {
+		for _, ch := range e.channelService.GetEnabledChannels() {
+			if ch.ID == frozenChannelID {
+				return ch.HasActiveModelCooldown("gpt-4", time.Now())
+			}
+		}
+		return false
+	}, 5*time.Second, 20*time.Millisecond)
+
+	enabledIDs := make([]int, 0, len(e.channelIDs))
+	for _, ch := range e.channelService.GetEnabledChannels() {
+		require.Equal(t, channel.StatusEnabled, ch.Status)
+		enabledIDs = append(enabledIDs, ch.ID)
+	}
+	require.ElementsMatch(t, e.channelIDs, enabledIDs)
+
+	// Exercise the real default selector's channel-model candidate path against
+	// that refreshed cache, not the static selector used to pin the canceling
+	// stream to its original channel.
+	selector := &DefaultSelector{ChannelService: e.channelService}
+	sameModel, err := selector.selectChannelCadidates(e.ctx, &llm.Request{Model: "gpt-4"})
+	require.NoError(t, err)
+	require.Len(t, sameModel, 1)
+	require.Equal(t, e.channelIDs[1], sameModel[0].Channel.ID)
+	require.NotEqual(t, frozenChannelID, sameModel[0].Channel.ID)
+
+	otherModel, err := selector.selectChannelCadidates(e.ctx, &llm.Request{Model: "gpt-4o"})
+	require.NoError(t, err)
+	otherModelIDs := make([]int, 0, len(otherModel))
+	for _, candidate := range otherModel {
+		otherModelIDs = append(otherModelIDs, candidate.Channel.ID)
+	}
+	require.ElementsMatch(t, e.channelIDs, otherModelIDs, "other models must still use the frozen model's channel")
 }
 
 func cancellationSwitchAndCooldownPolicy(threshold, cooldownMinutes int) biz.ClientCancellationPolicy {
@@ -208,56 +263,43 @@ func cancellationSwitchAndCooldownPolicy(threshold, cooldownMinutes int) biz.Cli
 	}
 }
 
-func TestClientCancellationCooldown_ThresholdTakesChannelOutOfRotation(t *testing.T) {
+func TestClientCancellationCooldown_ThresholdFreezesOnlyModel(t *testing.T) {
 	env := newCancellationTestEnv(t, cancelAfterFirstTokenExecutor(), []string{"key-1"})
 	env.setPolicy(t, cancellationSwitchAndCooldownPolicy(2, 3))
 
 	channelID := env.channelIDs[0]
+	before := env.getChannel(t, channelID)
 
-	// First cancellation only increments the independent counter. Streaming
-	// requests do not return the abort as a Process error; the state machine
-	// below observes the outcome instead.
-	env.process(env.project.ID, "key-1")
+	// First cancellation only increments the independent window. The mock
+	// stream emits content before context.Canceled, preserving first-token
+	// evidence; draining it in process finalizes the performance record.
+	require.NoError(t, env.process(env.project.ID, "key-1"))
 	time.Sleep(200 * time.Millisecond)
-	require.Equal(t, channel.StatusEnabled, env.getChannel(t, channelID).Status)
+	first := env.getChannel(t, channelID)
+	require.Equal(t, channel.StatusEnabled, first.Status)
+	require.Empty(t, first.ModelCooldowns)
+	require.Equal(t, before.Credentials, first.Credentials)
+	require.Empty(t, first.DisabledAPIKeys)
 
-	// The second one reaches the threshold and starts the cooldown.
-	env.process(env.project.ID, "key-1")
-
-	disabled := env.waitForStatus(t, channelID, channel.StatusDisabled)
-	require.NotNil(t, disabled.AutoDisabledAt)
-	require.NotNil(t, disabled.AutoDisableExpiresAt)
-	require.WithinDuration(t, time.Now().Add(3*time.Minute), *disabled.AutoDisableExpiresAt, time.Minute)
-	require.NotNil(t, disabled.ErrorMessage)
-	require.Contains(t, *disabled.ErrorMessage, "Client cancellation cooldown")
-
-	// The cooldown must remove the channel from the candidate pool so the next
-	// request switches to the other channel. The cache reload is asynchronous.
-	require.Eventually(t, func() bool {
-		for _, ch := range env.channelService.GetEnabledChannels() {
-			if ch.ID == channelID {
-				return false
-			}
-		}
-
-		return true
-	}, 5*time.Second, 20*time.Millisecond)
-
-	remaining := env.channelService.GetEnabledChannels()
-	require.Len(t, remaining, 1)
-	require.Equal(t, env.channelIDs[1], remaining[0].ID)
+	// The second eligible cancellation freezes only the requested model.
+	require.NoError(t, env.process(env.project.ID, "key-1"))
+	frozen := env.waitForModelCooldown(t, before, "gpt-4", 3)
+	require.Contains(t, frozen.ModelCooldowns[0].Reason, "2 cancellations")
+	env.requireModelOnlyCandidateSelection(t, channelID)
 }
 
-func TestClientCancellationCooldown_SuccessResetsCounter(t *testing.T) {
+func TestClientCancellationCooldown_SuccessPreservesWindow(t *testing.T) {
 	env := newCancellationTestEnv(t, cancelAfterFirstTokenExecutor(), []string{"key-1"})
 	env.setPolicy(t, cancellationSwitchAndCooldownPolicy(2, 3))
 
 	channelID := env.channelIDs[0]
+	before := env.getChannel(t, channelID)
 
-	env.process(env.project.ID, "key-1")
+	require.NoError(t, env.process(env.project.ID, "key-1"))
 	time.Sleep(200 * time.Millisecond)
+	require.Empty(t, env.getChannel(t, channelID).ModelCooldowns)
 
-	// A successful request resets the streak to zero. Streaming success needs a
+	// A successful request does not erase unexpired cancellations. Streaming success needs a
 	// full chunk sequence ending with finish_reason so the aggregator completes.
 	env.useExecutor(&mockExecutor{streamEvents: []*httpclient.StreamEvent{
 		{Data: []byte(`{"id":"chatcmpl-ok","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)},
@@ -266,16 +308,16 @@ func TestClientCancellationCooldown_SuccessResetsCounter(t *testing.T) {
 	}})
 	require.NoError(t, env.process(env.project.ID, "key-1"))
 
-	// One more cancellation (after upstream output) must not trigger the cooldown.
+	// One more eligible cancellation reaches two within the rolling window,
+	// despite the success between them.
 	env.useExecutor(cancelAfterFirstTokenExecutor())
-	env.process(env.project.ID, "key-1")
-
-	time.Sleep(300 * time.Millisecond)
-
-	require.Equal(t, channel.StatusEnabled, env.getChannel(t, channelID).Status)
+	require.NoError(t, env.process(env.project.ID, "key-1"))
+	frozen := env.waitForModelCooldown(t, before, "gpt-4", 3)
+	require.Contains(t, frozen.ModelCooldowns[0].Reason, "2 cancellations")
+	env.requireModelOnlyCandidateSelection(t, channelID)
 }
 
-func TestClientCancellationCooldown_CooldownOnlyDisablesUsedCredential(t *testing.T) {
+func TestClientCancellationCooldown_LegacyCooldownOnlyPreservesCredentials(t *testing.T) {
 	env := newCancellationTestEnv(t, cancelAfterFirstTokenExecutor(), []string{"key-1", "key-2"})
 	env.setPolicy(t, biz.ClientCancellationPolicy{
 		Enabled:         true,
@@ -286,27 +328,12 @@ func TestClientCancellationCooldown_CooldownOnlyDisablesUsedCredential(t *testin
 	})
 
 	channelID := env.channelIDs[0]
-
-	env.process(env.project.ID, "key-1")
-
-	var row *ent.Channel
-
-	require.Eventually(t, func() bool {
-		current, err := env.client.Channel.Get(env.ctx, channelID)
-		if err != nil {
-			return false
-		}
-
-		row = current
-
-		return len(current.DisabledAPIKeys) == 1
-	}, 5*time.Second, 20*time.Millisecond)
-
-	// The channel keeps serving with its other credential.
-	require.Equal(t, channel.StatusEnabled, row.Status)
-	require.Equal(t, "key-1", row.DisabledAPIKeys[0].Key)
-	require.NotNil(t, row.DisabledAPIKeys[0].ExpiresAt)
-	require.Contains(t, row.DisabledAPIKeys[0].Reason, "Client cancellation cooldown")
+	before := env.getChannel(t, channelID)
+	require.NoError(t, env.process(env.project.ID, "key-1"))
+	frozen := env.waitForModelCooldown(t, before, "gpt-4", 5)
+	require.Equal(t, []string{"key-1", "key-2"}, frozen.Credentials.APIKeys)
+	require.Empty(t, frozen.DisabledAPIKeys)
+	env.requireModelOnlyCandidateSelection(t, channelID)
 }
 
 func TestClientCancellationCooldown_ProjectFirstOverride(t *testing.T) {
@@ -323,18 +350,21 @@ func TestClientCancellationCooldown_ProjectFirstOverride(t *testing.T) {
 	})
 
 	channelID := env.channelIDs[0]
+	before := env.getChannel(t, channelID)
 
 	// A project without an override keeps the global threshold of 5.
-	env.process(env.project.ID, "key-1")
+	require.NoError(t, env.process(env.project.ID, "key-1"))
 	time.Sleep(200 * time.Millisecond)
-	require.Equal(t, channel.StatusEnabled, env.getChannel(t, channelID).Status)
+	first := env.getChannel(t, channelID)
+	require.Equal(t, channel.StatusEnabled, first.Status)
+	require.Empty(t, first.ModelCooldowns)
 
-	// The overriding project cools the channel down on the first cancellation.
-	env.process(42, "key-1")
-
-	disabled := env.waitForStatus(t, channelID, channel.StatusDisabled)
-	require.NotNil(t, disabled.AutoDisableExpiresAt)
-	require.WithinDuration(t, time.Now().Add(time.Minute), *disabled.AutoDisableExpiresAt, 30*time.Second)
+	// The overriding project freezes the model on its first eligible cancel,
+	// using the override's one-minute duration instead of the global 30.
+	require.NoError(t, env.process(42, "key-1"))
+	frozen := env.waitForModelCooldown(t, before, "gpt-4", 1)
+	require.Contains(t, frozen.ModelCooldowns[0].Reason, "1 cancellations")
+	env.requireModelOnlyCandidateSelection(t, channelID)
 }
 
 func TestClientCancellationCooldown_StatusCodeFailuresAreNotCancellations(t *testing.T) {
@@ -354,17 +384,23 @@ func TestClientCancellationCooldown_StatusCodeFailuresAreNotCancellations(t *tes
 	require.Error(t, env.process(env.project.ID, "key-1"))
 	time.Sleep(300 * time.Millisecond)
 
-	require.Equal(t, channel.StatusEnabled, env.getChannel(t, channelID).Status)
+	failed := env.getChannel(t, channelID)
+	require.Equal(t, channel.StatusEnabled, failed.Status)
+	require.Empty(t, failed.ModelCooldowns)
+	require.Empty(t, failed.DisabledAPIKeys)
 	// A 500 must still fail over to the next channel: the cancellation guard only
 	// covers client cancellations.
 	require.GreaterOrEqual(t, failing.requestCalls.Load(), int64(2))
 
-	// The cancellation counter was never touched, so a threshold of two still
-	// needs two real cancellations.
+	// A pre-first-token abort must also leave the cancellation window untouched;
+	// it has no upstream-output evidence and cannot freeze a model.
 	env.setPolicy(t, cancellationSwitchAndCooldownPolicy(2, 3))
 	env.useExecutor(&mockExecutor{err: context.Canceled})
 	require.Error(t, env.process(env.project.ID, "key-1"))
 	time.Sleep(300 * time.Millisecond)
 
-	require.Equal(t, channel.StatusEnabled, env.getChannel(t, channelID).Status)
+	aborted := env.getChannel(t, channelID)
+	require.Equal(t, channel.StatusEnabled, aborted.Status)
+	require.Empty(t, aborted.ModelCooldowns)
+	require.Empty(t, aborted.DisabledAPIKeys)
 }

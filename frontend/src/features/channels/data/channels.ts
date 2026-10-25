@@ -97,6 +97,8 @@ const CREATE_CHANNEL_MUTATION = `
           disableDurationMinutes
           disableUntilCron
           disableUntilTimezone
+          windowMinutes
+          freezeModel
         }
       }
       supportedModels
@@ -192,6 +194,8 @@ const DUPLICATE_CHANNEL_MUTATION = `
           disableDurationMinutes
           disableUntilCron
           disableUntilTimezone
+          windowMinutes
+          freezeModel
         }
       }
       supportedModels
@@ -287,6 +291,8 @@ const BULK_CREATE_CHANNELS_MUTATION = `
           disableDurationMinutes
           disableUntilCron
           disableUntilTimezone
+          windowMinutes
+          freezeModel
         }
       }
       supportedModels
@@ -381,6 +387,8 @@ const CHANNEL_FIELDS_FRAGMENT = `
           disableDurationMinutes
           disableUntilCron
           disableUntilTimezone
+          windowMinutes
+          freezeModel
         }
       }
       supportedModels
@@ -989,6 +997,8 @@ const CHANNEL_AUTO_DISABLE_COPY_SOURCES_QUERY = `
           disableDurationMinutes
           disableUntilCron
           disableUntilTimezone
+          windowMinutes
+          freezeModel
         }
       }
     }
@@ -1015,6 +1025,8 @@ const BULK_UPDATE_CHANNEL_AUTO_DISABLE_MUTATION = `
             disableDurationMinutes
             disableUntilCron
             disableUntilTimezone
+            windowMinutes
+            freezeModel
           }
         }
       }
@@ -1109,6 +1121,8 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
               disableDurationMinutes
               disableUntilCron
               disableUntilTimezone
+              windowMinutes
+              freezeModel
             }
           }
           credentials {
@@ -2541,16 +2555,18 @@ export function useFreezeChannelModel() {
           model: variables.model,
           durationMinutes: variables.durationMinutes && variables.durationMinutes > 0 ? variables.durationMinutes : null,
         });
+        if (!data.freezeChannelModel) throw new Error(t('common.errors.internalServerError'));
         return data.freezeChannelModel;
       } catch (error) {
         handleError(error, t('common.errors.internalServerError'));
-        return false;
+        throw error;
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
       queryClient.invalidateQueries({ queryKey: ['channel'] });
       queryClient.invalidateQueries({ queryKey: ['channelModelCooldowns'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
     },
   });
 }
@@ -2567,16 +2583,18 @@ export function useClearChannelModelCooldown() {
           CLEAR_CHANNEL_MODEL_COOLDOWN_MUTATION,
           variables,
         );
+        if (!data.clearChannelModelCooldown) throw new Error(t('common.errors.internalServerError'));
         return data.clearChannelModelCooldown;
       } catch (error) {
         handleError(error, t('common.errors.internalServerError'));
-        return false;
+        throw error;
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
       queryClient.invalidateQueries({ queryKey: ['channel'] });
       queryClient.invalidateQueries({ queryKey: ['channelModelCooldowns'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
     },
   });
 }
@@ -2608,6 +2626,7 @@ export function useChannelModelCooldowns(channelId: string, options?: { enabled?
       }
     },
     enabled: !!channelId && options?.enabled !== false,
+    refetchInterval: 30_000,
   });
 }
 

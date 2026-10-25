@@ -52,6 +52,7 @@ import {
   useFreezeChannelModel,
 } from '@/features/channels/data/channels';
 import { useModelSettings, useUpdateModelSettings } from '@/features/system/data/system';
+import { isActiveCooldown, useCooldownNow } from '@/features/channels/components/cooldown-details';
 import { useModels } from '../context/models-context';
 import {
   MAX_ASSOCIATION_PRIORITY,
@@ -843,11 +844,14 @@ function collectAssociationSourceIndices(
 
 // Models of this connection that are currently frozen (channel x model
 // cooldown). expiresAt == null means frozen until an operator unfreezes it.
-function activeFrozenModels(connection: ModelChannelConnection | undefined, now: number): string[] {
-  const cooldowns = connection?.channel?.modelCooldowns ?? [];
-  return cooldowns
-    .filter((cooldown) => !cooldown.expiresAt || new Date(cooldown.expiresAt).getTime() > now)
-    .map((cooldown) => cooldown.model);
+function activeFrozenModels(connection: ModelChannelConnection | undefined, now: number, originalRequestModel?: string): string[] {
+  const cooldowns = (connection?.channel?.modelCooldowns ?? []).filter((cooldown) => isActiveCooldown(cooldown, now));
+  const displayedModels = connection?.models?.map((entry) => entry.requestModel) ?? [];
+  const frozen = new Set(cooldowns.map((cooldown) => cooldown.model).filter((model) => displayedModels.includes(model)));
+  if (originalRequestModel && cooldowns.some((cooldown) => cooldown.model === originalRequestModel)) {
+    displayedModels.forEach((model) => frozen.add(model));
+  }
+  return [...frozen];
 }
 
 function testRegexPattern(pattern: string, value: string): boolean {
@@ -1078,6 +1082,11 @@ export function ModelsAssociationDialog() {
     };
 
     fetchConnections();
+    return () => {
+      // Closing, switching models, or changing rules invalidates the previous
+      // request even before the next preview request has started.
+      connectionsFetchSequenceRef.current += 1;
+    };
   }, [channelOptions, currentRow?.modelID, debouncedAssociations, inheritedAssociations, isOpen, isDeveloperMode, queryConnections]);
 
   useEffect(() => {
@@ -1145,6 +1154,7 @@ export function ModelsAssociationDialog() {
   };
 
   const handleClose = useCallback(() => {
+    connectionsFetchSequenceRef.current += 1;
     setOpen(null);
     setCurrentDeveloper(null);
     form.reset();
@@ -1418,11 +1428,17 @@ export function ModelsAssociationDialog() {
   // Replace the cooldown list of one preview channel so the cards reflect a
   // freeze/unfreeze immediately without waiting for the next preview refetch.
   const applyChannelModelCooldowns = useCallback(
-    (channelGUID: string, cooldowns: ModelChannelConnection['channel']['modelCooldowns']) => {
+    (
+      channelGUID: string,
+      update: (cooldowns: NonNullable<ModelChannelConnection['channel']['modelCooldowns']>) => NonNullable<ModelChannelConnection['channel']['modelCooldowns']>,
+    ) => {
+      // A pre-mutation preview may still contain the previous freeze state.
+      // The committed manual action, not that late response, is authoritative.
+      connectionsFetchSequenceRef.current += 1;
       setConnections((prev) =>
         prev.map((conn) =>
           String(conn.channel.id) === String(channelGUID)
-            ? { ...conn, channel: { ...conn.channel, modelCooldowns: cooldowns } }
+            ? { ...conn, channel: { ...conn.channel, modelCooldowns: update(conn.channel.modelCooldowns ?? []) } }
             : conn,
         ),
       );
@@ -1434,13 +1450,14 @@ export function ModelsAssociationDialog() {
     async (connection: ModelChannelConnection, model: string, durationMinutes: number) => {
       if (isDeveloperMode || !currentRow) return;
       try {
-        await freezeChannelModel.mutateAsync({ channelID: currentRow.id, model, durationMinutes });
-        applyChannelModelCooldowns(connection.channel.id, [
-          ...(connection.channel.modelCooldowns ?? []).filter(
-            (cooldown) => cooldown.model !== model && cooldown.expiresAt && new Date(cooldown.expiresAt).getTime() > Date.now(),
+        const targetModel = currentRow.modelID || model;
+        if (!(await freezeChannelModel.mutateAsync({ channelID: connection.channel.id, model: targetModel, durationMinutes }))) return;
+        applyChannelModelCooldowns(connection.channel.id, (cooldowns) => [
+          ...cooldowns.filter(
+            (cooldown) => cooldown.model !== targetModel && isActiveCooldown(cooldown, Date.now()),
           ),
           {
-            model,
+            model: targetModel,
             reason: t('models.dialogs.association.cooldown.manualReason'),
             createdAt: new Date().toISOString(),
             expiresAt: durationMinutes > 0 ? new Date(Date.now() + durationMinutes * 60_000).toISOString() : null,
@@ -1458,10 +1475,13 @@ export function ModelsAssociationDialog() {
     async (connection: ModelChannelConnection, model: string) => {
       if (isDeveloperMode || !currentRow) return;
       try {
-        await clearChannelModelCooldown.mutateAsync({ channelID: currentRow.id, model });
+        const targetModels = [...new Set([currentRow.modelID || model, ...(model && currentRow.modelID !== model ? [model] : [])])];
+        for (const targetModel of targetModels) {
+          if (!(await clearChannelModelCooldown.mutateAsync({ channelID: connection.channel.id, model: targetModel }))) return;
+        }
         applyChannelModelCooldowns(
           connection.channel.id,
-          (connection.channel.modelCooldowns ?? []).filter((cooldown) => cooldown.model !== model),
+          (cooldowns) => cooldowns.filter((cooldown) => !targetModels.includes(cooldown.model)),
         );
         toast.success(t('models.dialogs.association.cooldown.unfreezeSuccess'));
       } catch {
@@ -1477,9 +1497,8 @@ export function ModelsAssociationDialog() {
         return null;
       }
 
-      const frozen = activeFrozenModels(connection, Date.now()).filter((model) =>
-        (connection.models ?? []).some((entry) => entry.requestModel === model),
-      );
+      const requestModels = [...new Set(connection.models.map((model) => model.requestModel))];
+      const frozen = activeFrozenModels(connection, Date.now(), currentRow?.modelID);
 
       return (
         <DropdownMenu>
@@ -1493,14 +1512,14 @@ export function ModelsAssociationDialog() {
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align='end' className='min-w-44'>
-            <DropdownMenuItem onClick={() => connection.models.forEach((model) => handleFreezeModel(connection, model.requestModel, 30))}>
+            <DropdownMenuItem onClick={() => requestModels.forEach((model) => handleFreezeModel(connection, model, 30))}>
               {t('models.dialogs.association.cooldown.freeze30')}
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => connection.models.forEach((model) => handleFreezeModel(connection, model.requestModel, 1440))}>
+            <DropdownMenuItem onClick={() => requestModels.forEach((model) => handleFreezeModel(connection, model, 1440))}>
               {t('models.dialogs.association.cooldown.freeze24h')}
             </DropdownMenuItem>
             <DropdownMenuItem
-              onClick={() => connection.models.forEach((model) => handleFreezeModel(connection, model.requestModel, 0))}
+              onClick={() => requestModels.forEach((model) => handleFreezeModel(connection, model, 0))}
             >
               {t('models.dialogs.association.cooldown.freezeForever')}
             </DropdownMenuItem>
@@ -1519,12 +1538,10 @@ export function ModelsAssociationDialog() {
         </DropdownMenu>
       );
     },
-    [handleFreezeModel, handleUnfreezeModel, isDeveloperMode, t],
+    [handleFreezeModel, handleUnfreezeModel, isDeveloperMode, currentRow?.modelID, t],
   );
 
-  // Render-time snapshot for cooldown expiry checks; every state update in the
-  // dialog re-runs this, so badges stay fresh enough for minute-level cooldowns.
-  const nowMs = Date.now();
+  const nowMs = useCooldownNow(isOpen);
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
@@ -1756,7 +1773,8 @@ export function ModelsAssociationDialog() {
                           <ChannelModelsCard
                             connection={entry.connection}
                             dragHandle={canReorderPreview ? handle : undefined}
-                            frozenModels={activeFrozenModels(entry.connection, nowMs)}
+                            originalRequestModel={isDeveloperMode ? undefined : currentRow?.modelID}
+                            frozenModels={activeFrozenModels(entry.connection, nowMs, isDeveloperMode ? undefined : currentRow?.modelID)}
                             freezeMenu={buildFreezeMenu(entry.connection)}
                           />
                         )}

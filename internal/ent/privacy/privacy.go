@@ -183,6 +183,30 @@ func (f ChannelMutationRuleFunc) EvalMutation(ctx context.Context, m ent.Mutatio
 	return Denyf("ent/privacy: unexpected mutation type %T, expect *ent.ChannelMutation", m)
 }
 
+// The ChannelFailureEventQueryRuleFunc type is an adapter to allow the use of ordinary
+// functions as a query rule.
+type ChannelFailureEventQueryRuleFunc func(context.Context, *ent.ChannelFailureEventQuery) error
+
+// EvalQuery return f(ctx, q).
+func (f ChannelFailureEventQueryRuleFunc) EvalQuery(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.ChannelFailureEventQuery); ok {
+		return f(ctx, q)
+	}
+	return Denyf("ent/privacy: unexpected query type %T, expect *ent.ChannelFailureEventQuery", q)
+}
+
+// The ChannelFailureEventMutationRuleFunc type is an adapter to allow the use of ordinary
+// functions as a mutation rule.
+type ChannelFailureEventMutationRuleFunc func(context.Context, *ent.ChannelFailureEventMutation) error
+
+// EvalMutation calls f(ctx, m).
+func (f ChannelFailureEventMutationRuleFunc) EvalMutation(ctx context.Context, m ent.Mutation) error {
+	if m, ok := m.(*ent.ChannelFailureEventMutation); ok {
+		return f(ctx, m)
+	}
+	return Denyf("ent/privacy: unexpected mutation type %T, expect *ent.ChannelFailureEventMutation", m)
+}
+
 // The ChannelModelPriceQueryRuleFunc type is an adapter to allow the use of ordinary
 // functions as a query rule.
 type ChannelModelPriceQueryRuleFunc func(context.Context, *ent.ChannelModelPriceQuery) error
@@ -752,6 +776,8 @@ func queryFilter(q ent.Query) (Filter, error) {
 		return q.Filter(), nil
 	case *ent.ChannelQuery:
 		return q.Filter(), nil
+	case *ent.ChannelFailureEventQuery:
+		return q.Filter(), nil
 	case *ent.ChannelModelPriceQuery:
 		return q.Filter(), nil
 	case *ent.ChannelModelPriceVersionQuery:
@@ -808,6 +834,8 @@ func mutationFilter(m ent.Mutation) (Filter, error) {
 	case *ent.APIKeyProfileTemplateMutation:
 		return m.Filter(), nil
 	case *ent.ChannelMutation:
+		return m.Filter(), nil
+	case *ent.ChannelFailureEventMutation:
 		return m.Filter(), nil
 	case *ent.ChannelModelPriceMutation:
 		return m.Filter(), nil
