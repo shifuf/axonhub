@@ -1121,6 +1121,20 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
   const vertexApiKeyFields = useFieldArray({ control: form.control, name: 'credentials.vertexApiKeys' });
   const keyGroups = form.watch('credentials.keyGroups');
+
+  // Older channel records can have stale channel-level supportedModels that no
+  // longer appear in any key group's allowlist. Reconcile on open and whenever
+  // the groups change so test-model options match the visible group selections.
+  useEffect(() => {
+    if (!open || !keyGroups?.length) return;
+
+    const nextSupportedModels = reconcileGroupedSupportedModels(keyGroups);
+    setSupportedModels((prev) =>
+      prev.length === nextSupportedModels.length && prev.every((model, index) => model === nextSupportedModels[index])
+        ? prev
+        : nextSupportedModels
+    );
+  }, [open, keyGroups]);
   // Per-row fetch state: which group row is currently probing its upstream /models.
   const [fetchingGroupIndex, setFetchingGroupIndex] = useState<number | null>(null);
   // Which group row's model allowlist is open in the side panel, and the fetched

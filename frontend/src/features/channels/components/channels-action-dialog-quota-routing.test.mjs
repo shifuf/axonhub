@@ -109,6 +109,15 @@ test('deselecting a previously manual model removes it from test and association
   assert.deepEqual(result, ['model-1', 'model-2']);
 });
 
+test('opening a grouped channel reconciles stale channel-level models into test options', () => {
+  const groups = [
+    { models: ['deepseek-v4.1-flash', 'glm-5.3-flash', 'grok-4.7'] },
+    { models: ['deepseek-4.1-flash(fingerprint≈k52)', 'deepseek-4.1-flash-background(fingerprint≈k77)'] },
+  ];
+  assert.deepEqual(reconcileGroupedSupportedModels(groups), groups.flatMap((group) => group.models));
+  assert.match(source, /if \(!open \|\| !keyGroups\?\.length\) return;[\s\S]*?reconcileGroupedSupportedModels\(keyGroups\)[\s\S]*?setSupportedModels/);
+});
+
 test('saving uses the reconciled key-group model list for channel model options', () => {
   assert.match(source, /supportedModels: resolvedSupportedModels/);
   assert.match(source, /reconcileGroupedSupportedModels\(submittedKeyGroups\)/);
