@@ -415,11 +415,18 @@ type KeyGroupFormRow = {
 // so this returns an empty list and the plain apiKeys editor stays in use. Groups
 // stored before a group could hold several keys carry a single apiKey, which is
 // folded into the key list here.
-function reconcileGroupedSupportedModels(
+function reconcileGroupedSupportedModels(groups: Array<{ models?: string[] | null }>): string[] {
+  // A group's checked model list is the source of truth. Unconditionally
+  // unioning manualModels here resurrects models the user just unchecked.
+  return [...new Set(groups.flatMap((group) => group.models || []))];
+}
+
+function reconcileGroupedManualModels(
   groups: Array<{ models?: string[] | null }>,
   manualModels: string[]
 ): string[] {
-  return [...new Set([...manualModels, ...groups.flatMap((group) => group.models || [])])];
+  const selectedModels = new Set(groups.flatMap((group) => group.models || []));
+  return manualModels.filter((model) => selectedModels.has(model));
 }
 
 // Once a group has been refreshed, the fetched list is authoritative for its
@@ -1682,7 +1689,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       const submittedKeyGroups = valuesForSubmit.credentials?.keyGroups || [];
       const resolvedSupportedModels =
         submittedKeyGroups.length > 0
-          ? reconcileGroupedSupportedModels(submittedKeyGroups, manualModels)
+          ? reconcileGroupedSupportedModels(submittedKeyGroups)
           : supportedModels;
       const dataWithModels = {
         ...valuesForSubmit,
@@ -1902,11 +1909,25 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       return;
     }
 
-    setSupportedModels((prev) => {
-      const combinedModels = new Set([...prev, ...models]);
-      if (combinedModels.size === prev.length) return prev;
-      return [...combinedModels];
-    });
+    const groups = form.getValues('credentials.keyGroups') || [];
+    if (groups.length > 0) {
+      const nextGroups = groups.map((group, index) => {
+        const groupModels = group.models || [];
+        const nextGroupModels = [...new Set([...groupModels, ...models])];
+        form.setValue(`credentials.keyGroups.${index}.models`, nextGroupModels, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+        return { ...group, models: nextGroupModels };
+      });
+      setSupportedModels(reconcileGroupedSupportedModels(nextGroups));
+    } else {
+      setSupportedModels((prev) => {
+        const combinedModels = new Set([...prev, ...models]);
+        if (combinedModels.size === prev.length) return prev;
+        return [...combinedModels];
+      });
+    }
     setManualModels((prev) => {
       // Only add models that are NOT already in supportedModels
       const newModels = models.filter((m) => !supportedModels.includes(m));
@@ -1915,7 +1936,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       return [...combinedModels];
     });
     setNewModel('');
-  }, [newModel, supportedModels]);
+  }, [form, newModel, supportedModels]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -2200,7 +2221,9 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         shouldDirty: true,
         shouldValidate: true,
       });
-      setSupportedModels(reconcileGroupedSupportedModels(nextGroups, manualModels));
+      const nextManualModels = reconcileGroupedManualModels(nextGroups, manualModels);
+      setManualModels(nextManualModels);
+      setSupportedModels(reconcileGroupedSupportedModels(nextGroups));
       closeGroupModelsPanel();
       return;
     }
@@ -2232,7 +2255,9 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       return { ...group, models };
     });
 
-    setSupportedModels(reconcileGroupedSupportedModels(nextGroups, manualModels));
+    const nextManualModels = reconcileGroupedManualModels(nextGroups, manualModels);
+    setManualModels(nextManualModels);
+    setSupportedModels(reconcileGroupedSupportedModels(nextGroups));
     closeGroupModelsPanel();
   }, [activeGroupModelIndex, closeGroupModelsPanel, form, groupModelSelection, manualModels, unifiedFetchedModels, fetchedGroupModelIndexes]);
 

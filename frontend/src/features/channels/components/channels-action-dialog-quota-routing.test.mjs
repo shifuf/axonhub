@@ -13,12 +13,13 @@ const helperNames = [
   'recallQuotaRoutingMode',
   'quotaRoutingModeSettingsPatch',
   'reconcileGroupedSupportedModels',
+  'reconcileGroupedManualModels',
   'getGroupModelCandidates',
   'reconcileFetchedGroupSelection',
   'reconcileUnifiedFetchedGroupModels',
 ];
 const helperNodes = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && helperNames.includes(node.name?.text));
-assert.equal(helperNodes.length, 6, 'dialog behavior helpers must stay in channels-action-dialog.tsx');
+assert.equal(helperNodes.length, 7, 'dialog behavior helpers must stay in channels-action-dialog.tsx');
 const helpers = helperNodes.map((node) => `export ${node.getText(ast).replace(/^export\s+/, '')}`).join('\n');
 
 function loadTsModule(sourceText) {
@@ -28,7 +29,7 @@ function loadTsModule(sourceText) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 }
 
-const { recallQuotaRoutingMode, quotaRoutingModeSettingsPatch, reconcileGroupedSupportedModels, getGroupModelCandidates, reconcileFetchedGroupSelection, reconcileUnifiedFetchedGroupModels } =
+const { recallQuotaRoutingMode, quotaRoutingModeSettingsPatch, reconcileGroupedSupportedModels, reconcileGroupedManualModels, getGroupModelCandidates, reconcileFetchedGroupSelection, reconcileUnifiedFetchedGroupModels } =
   await loadTsModule(helpers);
 
 // Type-only imports are erased, so utils/merge.ts loads standalone.
@@ -97,17 +98,21 @@ test('inherit option includes the current global mode when available', () => {
 });
 
 
-test('group selection replaces stale grouped models while retaining manually added models', () => {
-  const result = reconcileGroupedSupportedModels(
-    [{ models: ['gpt-6-luna'] }, { models: ['gpt-5.6-luna'] }],
-    ['manual-model'],
-  );
-  assert.deepEqual(result, ['manual-model', 'gpt-6-luna', 'gpt-5.6-luna']);
+test('group selection is authoritative and retains manual models only while selected', () => {
+  const groups = [{ models: ['gpt-6-luna', 'manual-model'] }, { models: ['gpt-5.6-luna'] }];
+  assert.deepEqual(reconcileGroupedSupportedModels(groups), ['gpt-6-luna', 'manual-model', 'gpt-5.6-luna']);
+  assert.deepEqual(reconcileGroupedManualModels(groups, ['manual-model', 'stale-manual-model']), ['manual-model']);
+});
+
+test('deselecting a previously manual model removes it from test and association candidates', () => {
+  const result = reconcileGroupedSupportedModels([{ models: ['model-1', 'model-2'] }]);
+  assert.deepEqual(result, ['model-1', 'model-2']);
 });
 
 test('saving uses the reconciled key-group model list for channel model options', () => {
   assert.match(source, /supportedModels: resolvedSupportedModels/);
-  assert.match(source, /reconcileGroupedSupportedModels\(submittedKeyGroups, manualModels\)/);
+  assert.match(source, /reconcileGroupedSupportedModels\(submittedKeyGroups\)/);
+  assert.equal(source.split('setManualModels(nextManualModels)').length - 1, 2);
 });
 
 
