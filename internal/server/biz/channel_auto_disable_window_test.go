@@ -80,17 +80,23 @@ func TestChannelService_WindowLegacyActionsPreserveCredentials(t *testing.T) {
 	}
 }
 
-func TestChannelService_WindowExpiresOldFailuresAndSurvivesSuccess(t *testing.T) {
+func TestChannelService_WindowExpiresOldFailuresAndSuccessResetsWindow(t *testing.T) {
 	rule := objects.APIKeyAutoDisableRule{Times: 2, WindowMinutes: 1, Action: objects.APIKeyAutoDisableActionPermanent}
 	ctx, svc, ch := newWindowRuleTestService(t, rule)
-	perf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", Model: "gpt-4", ResponseStatusCode: 500}
+	base := time.Now().Add(-20 * time.Second)
+	perf := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", Model: "gpt-4", ResponseStatusCode: 500, EndTime: base}
 	// Seed one expired failure (outside the one-minute window) as a persisted row.
-	insertChannelFailureEventForTest(t, svc, ctx, perf, autoDisableScopeChannel, 0, rule, time.Now().Add(-2*time.Minute))
+	insertChannelFailureEventForTest(t, svc, ctx, perf, autoDisableScopeChannel, 0, rule, base.Add(-2*time.Minute))
 	_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
 	require.False(t, acted, "expired errors cannot contribute")
-	svc.clearAutoDisableCountsOnSuccess(perf)
+	success := &PerformanceRecord{ChannelID: ch.ID, Model: perf.Model, Success: true, EndTime: base.Add(time.Second)}
+	svc.clearAutoDisableCountsOnSuccess(ctx, success)
+	perf.EndTime = base.Add(2 * time.Second)
 	_, acted = svc.evaluateAutoDisableForFailure(ctx, perf)
-	require.True(t, acted, "a success must not erase failures still inside a rolling window")
+	require.False(t, acted, "the first failure after success starts a fresh window")
+	perf.EndTime = base.Add(3 * time.Second)
+	_, acted = svc.evaluateAutoDisableForFailure(ctx, perf)
+	require.True(t, acted, "the second failure after success reaches the threshold")
 	updated, err := svc.db.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
 	require.Equal(t, channel.StatusEnabled, updated.Status)
@@ -189,7 +195,6 @@ func TestChannelService_WindowConcurrentFailuresArePreservedAndBounded(t *testin
 		_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
 		require.False(t, acted, "one burst must have only one in-flight action")
 	}
-	svc.clearAutoDisableCountsOnSuccess(perf)
 	close(release)
 	released = true
 	select {
@@ -236,34 +241,61 @@ func TestChannelService_WindowActionFailureCanRetry(t *testing.T) {
 	require.Empty(t, svc.windowedRuleActionsInFlight[ch.ID])
 }
 
-func TestChannelService_WindowSuccessPreservesBothModelHistories(t *testing.T) {
+func TestChannelService_WindowSuccessResetsOnlyItsModelHistory(t *testing.T) {
 	rule := objects.APIKeyAutoDisableRule{Times: 2, FreezeModel: true,
 		Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: lo.ToPtr(15)}
 	ctx, svc, ch := newWindowRuleTestService(t, rule)
-	a := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", Model: "gpt-4", ResponseStatusCode: 500}
-	b := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key2", Model: "gpt-4o", ResponseStatusCode: 500}
+	base := time.Now().Add(-20 * time.Second)
+	a := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", Model: "gpt-4", ResponseStatusCode: 500, EndTime: base}
+	b := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key2", Model: "gpt-4o", ResponseStatusCode: 500, EndTime: base}
 	_, acted := svc.evaluateAutoDisableForFailure(ctx, a)
 	require.False(t, acted)
 	_, acted = svc.evaluateAutoDisableForFailure(ctx, b)
 	require.False(t, acted)
-	svc.clearAutoDisableCountsOnSuccess(a)
+	svc.clearAutoDisableCountsOnSuccess(ctx, &PerformanceRecord{ChannelID: ch.ID, Model: a.Model, Success: true, EndTime: base.Add(time.Second)})
+	a.EndTime = base.Add(2 * time.Second)
 	_, acted = svc.evaluateAutoDisableForFailure(ctx, a)
-	require.True(t, acted, "same model history survives success")
+	require.False(t, acted, "the successful model starts a fresh failure window")
+	b.EndTime = base.Add(2 * time.Second)
 	_, acted = svc.evaluateAutoDisableForFailure(ctx, b)
-	require.True(t, acted, "other model streak stays independent")
+	require.True(t, acted, "a success for another model cannot reset this model's failures")
+}
+
+func TestChannelService_WindowIgnoresLateFailureCompletedBeforeSuccess(t *testing.T) {
+	rule := objects.APIKeyAutoDisableRule{Times: 2, WindowMinutes: 10, Action: objects.APIKeyAutoDisableActionPermanent}
+	ctx, svc, ch := newWindowRuleTestService(t, rule)
+	base := time.Now().Add(-20 * time.Second)
+	first := &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", Model: "gpt-4", ResponseStatusCode: 500, EndTime: base}
+	_, acted := svc.evaluateAutoDisableForFailure(ctx, first)
+	require.False(t, acted)
+
+	svc.clearAutoDisableCountsOnSuccess(ctx, &PerformanceRecord{ChannelID: ch.ID, Model: first.Model, Success: true, EndTime: base.Add(time.Second)})
+	late := *first
+	late.EndTime = base.Add(500 * time.Millisecond)
+	_, acted = svc.evaluateAutoDisableForFailure(ctx, &late)
+	require.False(t, acted, "a failure report delivered late cannot undo the newer success reset")
+
+	first.EndTime = base.Add(2 * time.Second)
+	_, acted = svc.evaluateAutoDisableForFailure(ctx, first)
+	require.False(t, acted, "first post-success failure starts a new streak")
+	first.EndTime = base.Add(3 * time.Second)
+	_, acted = svc.evaluateAutoDisableForFailure(ctx, first)
+	require.True(t, acted, "only post-success failures contribute")
 }
 
 func TestChannelService_WindowKeylessSuccessDoesNotClearOtherModelHistory(t *testing.T) {
 	rule := objects.APIKeyAutoDisableRule{Times: 2, FreezeModel: true,
 		Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: lo.ToPtr(15)}
 	ctx, svc, ch := newWindowRuleTestService(t, rule)
-	a := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", ResponseStatusCode: 500}
-	b := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4o", ResponseStatusCode: 500}
+	base := time.Now().Add(-20 * time.Second)
+	a := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", ResponseStatusCode: 500, EndTime: base}
+	b := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4o", ResponseStatusCode: 500, EndTime: base}
 	_, acted := svc.evaluateAutoDisableForFailure(ctx, a)
 	require.False(t, acted)
 	_, acted = svc.evaluateAutoDisableForFailure(ctx, b)
 	require.False(t, acted)
-	svc.clearAutoDisableCountsOnSuccess(a)
+	svc.clearAutoDisableCountsOnSuccess(ctx, &PerformanceRecord{ChannelID: ch.ID, Model: a.Model, Success: true, EndTime: base.Add(time.Second)})
+	b.EndTime = base.Add(2 * time.Second)
 	_, acted = svc.evaluateAutoDisableForFailure(ctx, b)
 	require.True(t, acted, "success on another model cannot reset this model's failure streak")
 }

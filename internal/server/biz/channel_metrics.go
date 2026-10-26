@@ -524,7 +524,7 @@ func (svc *ChannelService) RecordPerformance(ctx context.Context, perf *Performa
 	}()
 
 	if perf.Success {
-		svc.clearAutoDisableCountsOnSuccess(perf)
+		svc.clearAutoDisableCountsOnSuccess(ctx, perf)
 		svc.clearCancellationCountsOnSuccess(perf)
 
 		// Let the round_robin_success strategy count this success and move

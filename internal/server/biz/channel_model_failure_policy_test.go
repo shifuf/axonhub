@@ -53,6 +53,47 @@ func TestChannelService_ModelFailurePolicyLegacyActionsNeverDisableKeys(t *testi
 	}
 }
 
+func TestChannelService_PermanentFailureThresholdResetsAfterSuccess(t *testing.T) {
+	rule := objects.APIKeyAutoDisableRule{Times: 100, Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: lo.ToPtr(15)}
+	ctx, svc, ch := newWindowRuleTestService(t, rule)
+	require.NoError(t, svc.SystemService.SetRetryPolicy(ctx, &RetryPolicy{
+		AutoDisableChannel: AutoDisableChannel{
+			PermanentFailureThreshold:     6,
+			PermanentFailureWindowMinutes: 24 * 60,
+		},
+	}))
+
+	base := time.Now().Add(-time.Minute)
+	fail := func(at time.Time) {
+		_, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
+			ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 503, EndTime: at,
+		})
+		require.False(t, acted)
+	}
+	for i := 0; i < 3; i++ {
+		fail(base.Add(time.Duration(i) * time.Second))
+	}
+	svc.clearAutoDisableCountsOnSuccess(ctx, &PerformanceRecord{
+		ChannelID: ch.ID, Model: "gpt-4", Success: true, EndTime: base.Add(10 * time.Second),
+	})
+
+	for i := 1; i <= 5; i++ {
+		fail(base.Add(time.Duration(10+i) * time.Second))
+		stored, err := svc.db.Channel.Get(ctx, ch.ID)
+		require.NoError(t, err)
+		require.Empty(t, stored.ModelCooldowns, "pre-success failures must not contribute to the permanent threshold")
+	}
+	_, acted := svc.evaluateAutoDisableForFailure(ctx, &PerformanceRecord{
+		ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 503, EndTime: base.Add(16 * time.Second),
+	})
+	require.True(t, acted)
+	stored, err := svc.db.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	require.Len(t, stored.ModelCooldowns, 1)
+	require.Nil(t, stored.ModelCooldowns[0].ExpiresAt, "the sixth post-success failure permanently freezes the model")
+	require.Contains(t, stored.ModelCooldowns[0].Reason, "6 failures within 1440 minutes")
+}
+
 func TestChannelService_ModelFailurePolicySixthFailureEscalatesWithoutConsumingWindow(t *testing.T) {
 	rule := objects.APIKeyAutoDisableRule{Times: 2, WindowMinutes: 10, FreezeModel: true,
 		Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: lo.ToPtr(17)}
@@ -62,8 +103,6 @@ func TestChannelService_ModelFailurePolicySixthFailureEscalatesWithoutConsumingW
 		perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: fmt.Sprintf("key%d", (i-1)%3+1),
 			ResponseStatusCode: 503, ErrorMessage: fmt.Sprintf("provider failure %d", i)}
 		svc.evaluateAutoDisableForFailure(ctx, perf)
-		// Successful traffic and temporary freezes must not erase the burst.
-		svc.clearAutoDisableCountsOnSuccess(perf)
 		stored, err := svc.db.Channel.Get(ctx, ch.ID)
 		require.NoError(t, err)
 		require.Empty(t, stored.DisabledAPIKeys)

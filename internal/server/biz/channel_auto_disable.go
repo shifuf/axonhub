@@ -283,8 +283,17 @@ func (svc *ChannelService) evaluateRules(ctx context.Context, perf *PerformanceR
 	return false, false
 }
 
-// Success never removes failures that still belong to a rolling window.
-func (svc *ChannelService) clearAutoDisableCountsOnSuccess(_ *PerformanceRecord) {}
+// A successful request resets the failure streak for its exact channel/model
+// pair. The reset is persisted so delayed failures and other server instances
+// observe the same boundary.
+func (svc *ChannelService) clearAutoDisableCountsOnSuccess(ctx context.Context, perf *PerformanceRecord) {
+	if perf == nil || !perf.Success {
+		return
+	}
+	if err := svc.recordChannelModelSuccessEvent(ctx, perf); err != nil {
+		log.Error(ctx, "failed to persist channel model success reset", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+	}
+}
 
 func autoDisableRuleIdentity(perf *PerformanceRecord, _ objects.APIKeyAutoDisableRule) string {
 	return fmt.Sprintf("channel-model:%d:%q", perf.ChannelID, perf.Model)
@@ -475,8 +484,20 @@ func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *Perfo
 	if failedAt.IsZero() || failedAt.After(now) {
 		failedAt = now
 	}
-	if !failedAt.After(now.Add(-window)) {
+	windowCutoff := now.Add(-window)
+	if !failedAt.After(windowCutoff) {
 		return false
+	}
+	successAt, err := svc.latestChannelModelSuccessAt(ctx, perf.ChannelID, perf.Model)
+	if err != nil {
+		log.Error(ctx, "failed to load channel model success reset", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+		return false
+	}
+	if !successAt.IsZero() && !failedAt.After(successAt) {
+		return false
+	}
+	if successAt.After(windowCutoff) {
+		windowCutoff = successAt
 	}
 	windowKey := fmt.Sprintf("%s:window:%d", autoDisableRuleIdentity(perf, rule), rule.WindowMinutes)
 
@@ -485,13 +506,32 @@ func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *Perfo
 		return false
 	}
 
-	snapshot, err := svc.countChannelFailureEvents(ctx, ruleKey, windowKey, now.Add(-window))
+	snapshot, err := svc.countChannelFailureEvents(ctx, ruleKey, windowKey, windowCutoff)
 	if err != nil {
 		log.Error(ctx, "failed to count channel failure window", log.Cause(err), log.Int("channel_id", perf.ChannelID))
 		return false
 	}
 
+	successAt, err = svc.latestChannelModelSuccessAt(ctx, perf.ChannelID, perf.Model)
+	if err != nil {
+		log.Error(ctx, "failed to reload channel model success reset", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+		return false
+	}
+	if !successAt.IsZero() && !failedAt.After(successAt) {
+		return false
+	}
+	if successAt.After(windowCutoff) {
+		windowCutoff = successAt
+		snapshot, err = svc.countChannelFailureEvents(ctx, ruleKey, windowKey, windowCutoff)
+		if err != nil {
+			log.Error(ctx, "failed to recount channel failure window after success", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+			return false
+		}
+	}
 	permanentCutoff := now.Add(-time.Duration(permanentWindowMinutes) * time.Minute)
+	if successAt.After(permanentCutoff) {
+		permanentCutoff = successAt
+	}
 	permanentSnapshot, err := svc.countChannelModelFailureEvents(ctx, perf.ChannelID, perf.Model, permanentCutoff)
 	if err != nil {
 		log.Error(ctx, "failed to count permanent model failure window", log.Cause(err), log.Int("channel_id", perf.ChannelID))
@@ -502,6 +542,18 @@ func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *Perfo
 		return false
 	}
 	if !svc.claimWindowedRuleAction(perf.ChannelID, windowKey) {
+		return false
+	}
+	// A successful request may have completed while this failure was waiting
+	// to acquire the action claim. Re-check its persisted boundary before freezing.
+	successAt, err = svc.latestChannelModelSuccessAt(ctx, perf.ChannelID, perf.Model)
+	if err != nil {
+		svc.releaseWindowedRuleAction(perf.ChannelID, windowKey)
+		log.Error(ctx, "failed to verify channel model success reset before freeze", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+		return false
+	}
+	if !successAt.IsZero() && !failedAt.After(successAt) {
+		svc.releaseWindowedRuleAction(perf.ChannelID, windowKey)
 		return false
 	}
 

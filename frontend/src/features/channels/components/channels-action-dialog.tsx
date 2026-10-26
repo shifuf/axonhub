@@ -422,6 +422,32 @@ function reconcileGroupedSupportedModels(
   return [...new Set([...manualModels, ...groups.flatMap((group) => group.models || [])])];
 }
 
+// Once a group has been refreshed, the fetched list is authoritative for its
+// provider-managed models. Preserve only explicitly manual models; old fetched
+// models no longer advertised by the provider must not remain selectable.
+function getGroupModelCandidates(ownModels: string[], fetchedModels: string[], manualModels: string[], hasFetched: boolean): string[] {
+  if (!hasFetched) return [...new Set(ownModels)];
+  return [...new Set([...fetchedModels, ...ownModels.filter((model) => manualModels.includes(model))])];
+}
+
+function reconcileFetchedGroupSelection(ownModels: string[], candidates: string[]): string[] {
+  const allowed = new Set(candidates);
+  return [...new Set(ownModels.filter((model) => allowed.has(model)))];
+}
+
+function reconcileUnifiedFetchedGroupModels(
+  ownModels: string[],
+  selectedModels: string[],
+  fetchedModels: string[],
+  manualModels: string[],
+  hasFetched: boolean
+): string[] {
+  if (!hasFetched) return [...ownModels];
+  const fetched = new Set(fetchedModels);
+  const preservedManual = ownModels.filter((model) => manualModels.includes(model) && selectedModels.includes(model));
+  return [...new Set([...preservedManual, ...selectedModels.filter((model) => fetched.has(model))])];
+}
+
 function normalizeKeyGroupsFromCredentials(
   credentials?: {
     apiKey?: string | null;
@@ -1895,16 +1921,17 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   };
 
   const openGroupModelsPanel = useCallback(
-    (index: number) => {
+    (index: number, refreshedModels?: string[]) => {
       const own = form.getValues(`credentials.keyGroups.${index}.models`) || [];
+      const fetchedModels = refreshedModels ?? unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model);
+      const hasFetched = refreshedModels !== undefined || unifiedFetchedModels.some((entry) => entry.groupIndex === index);
+      const candidates = getGroupModelCandidates(own, fetchedModels, manualModels, hasFetched);
       setActiveGroupModelIndex(index);
-      // Only models already saved for this group are checked; fetched candidates
-      // are available to select but must not be auto-selected.
-      setGroupModelSelection([...own]);
+      setGroupModelSelection(hasFetched ? reconcileFetchedGroupSelection(own, candidates) : [...own]);
       setGroupModelsSearch('');
       setShowGroupModelsPanel(true);
     },
-    [form]
+    [form, manualModels, unifiedFetchedModels]
   );
 
   // Probe the upstream /models endpoint using one group's own key and write the
@@ -1967,7 +1994,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           }
           return next;
         });
-        openGroupModelsPanel(index);
+        openGroupModelsPanel(index, models);
       } catch (_error) {
         // Error is already handled by the mutation
       } finally {
@@ -2044,10 +2071,11 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     setUnifiedFetchedModels(collected);
     setModelSourceGroups((prev) => ({ ...prev, ...sources }));
+    const fetchedCandidates = new Set([...collected.map((entry) => entry.model), ...manualModels]);
     const selected = new Set<string>();
     for (const group of groups) {
       for (const model of group.models || []) {
-        selected.add(model);
+        if (fetchedCandidates.has(model)) selected.add(model);
       }
     }
     setGroupModelSelection([...selected]);
@@ -2058,7 +2086,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
     if (failed > 0) {
       toast.warning(t('channels.dialogs.fields.keyGroup.fetchAllPartial', { failed }));
     }
-  }, [fetchModels, form, isEdit, currentRow, t]);
+  }, [fetchModels, form, isEdit, currentRow, t, manualModels]);
 
   const handleAddManualModelToAllGroups = useCallback(() => {
     const model = newModel.trim();
@@ -2111,13 +2139,14 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
   const groupModelCandidates = useMemo(() => {
     if (activeGroupModelIndex === null) {
-      return unifiedFetchedModels.map((entry) => entry.model);
+      return [...new Set([...unifiedFetchedModels.map((entry) => entry.model), ...manualModels])];
     }
 
     const own = form.getValues(`credentials.keyGroups.${activeGroupModelIndex}.models`) || [];
     const fetchedForGroup = unifiedFetchedModels.filter((entry) => entry.groupIndex === activeGroupModelIndex).map((entry) => entry.model);
-    return [...new Set([...fetchedForGroup, ...own])];
-  }, [activeGroupModelIndex, unifiedFetchedModels, form]);
+    const hasFetchedForGroup = unifiedFetchedModels.some((entry) => entry.groupIndex === activeGroupModelIndex);
+    return getGroupModelCandidates(own, fetchedForGroup, manualModels, hasFetchedForGroup);
+  }, [activeGroupModelIndex, unifiedFetchedModels, manualModels, form]);
 
   const filteredGroupModelCandidates = useMemo(() => {
     const search = groupModelsSearch.trim().toLowerCase();
@@ -2178,14 +2207,21 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     const groups = form.getValues('credentials.keyGroups') || [];
     const nextGroups = groups.map((group, index) => {
-      const fetchedForGroup = new Set(unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model));
-      const selectedForGroup = [...(byGroup.get(index) || [])];
-      const preservedManual = (group.models || []).filter((model) => !fetchedForGroup.has(model));
-      const models = [...new Set([...preservedManual, ...selectedForGroup])];
-      form.setValue(`credentials.keyGroups.${index}.models`, models, {
-        shouldDirty: true,
-        shouldValidate: true,
-      });
+      const fetchedForGroup = unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model);
+      const hasFetchedForGroup = unifiedFetchedModels.some((entry) => entry.groupIndex === index);
+      const models = reconcileUnifiedFetchedGroupModels(
+        group.models || [],
+        [...(byGroup.get(index) || [])],
+        fetchedForGroup,
+        manualModels,
+        hasFetchedForGroup
+      );
+      if (hasFetchedForGroup) {
+        form.setValue(`credentials.keyGroups.${index}.models`, models, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+      }
       return { ...group, models };
     });
 

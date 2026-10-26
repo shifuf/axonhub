@@ -9,9 +9,16 @@ const dialogPath = new URL('./channels-action-dialog.tsx', import.meta.url);
 const source = readFileSync(dialogPath, 'utf8');
 const ast = ts.createSourceFile('channels-action-dialog.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 
-const helperNames = ['recallQuotaRoutingMode', 'quotaRoutingModeSettingsPatch', 'reconcileGroupedSupportedModels'];
+const helperNames = [
+  'recallQuotaRoutingMode',
+  'quotaRoutingModeSettingsPatch',
+  'reconcileGroupedSupportedModels',
+  'getGroupModelCandidates',
+  'reconcileFetchedGroupSelection',
+  'reconcileUnifiedFetchedGroupModels',
+];
 const helperNodes = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && helperNames.includes(node.name?.text));
-assert.equal(helperNodes.length, 3, 'mapping helpers must stay in channels-action-dialog.tsx');
+assert.equal(helperNodes.length, 6, 'dialog behavior helpers must stay in channels-action-dialog.tsx');
 const helpers = helperNodes.map((node) => `export ${node.getText(ast).replace(/^export\s+/, '')}`).join('\n');
 
 function loadTsModule(sourceText) {
@@ -21,7 +28,8 @@ function loadTsModule(sourceText) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 }
 
-const { recallQuotaRoutingMode, quotaRoutingModeSettingsPatch, reconcileGroupedSupportedModels } = await loadTsModule(helpers);
+const { recallQuotaRoutingMode, quotaRoutingModeSettingsPatch, reconcileGroupedSupportedModels, getGroupModelCandidates, reconcileFetchedGroupSelection, reconcileUnifiedFetchedGroupModels } =
+  await loadTsModule(helpers);
 
 // Type-only imports are erased, so utils/merge.ts loads standalone.
 const mergeSource = readFileSync(new URL('../utils/merge.ts', import.meta.url), 'utf8');
@@ -100,4 +108,62 @@ test('group selection replaces stale grouped models while retaining manually add
 test('saving uses the reconciled key-group model list for channel model options', () => {
   assert.match(source, /supportedModels: resolvedSupportedModels/);
   assert.match(source, /reconcileGroupedSupportedModels\(submittedKeyGroups, manualModels\)/);
+});
+
+
+test('a fresh group model fetch excludes stale removed models but retains explicitly manual models', () => {
+  assert.deepEqual(
+    getGroupModelCandidates(
+      ['old-model-1', 'old-model-2', 'manual-model'],
+      ['current-model-1', 'current-model-2'],
+      ['manual-model'],
+      true,
+    ),
+    ['current-model-1', 'current-model-2', 'manual-model'],
+  );
+});
+
+test('a fresh fetch prunes unsupported saved selections but keeps an explicit manual model', () => {
+  const candidates = getGroupModelCandidates(
+    ['removed-model', 'current-model', 'manual-model'],
+    ['current-model'],
+    ['manual-model'],
+    true,
+  );
+  assert.deepEqual(reconcileFetchedGroupSelection(['removed-model', 'current-model', 'manual-model'], candidates), [
+    'current-model',
+    'manual-model',
+  ]);
+});
+
+test('before fetching, a group picker still shows its saved selection', () => {
+  assert.deepEqual(getGroupModelCandidates(['saved-model'], [], [], false), ['saved-model']);
+});
+
+test('group and unified-fetch model flows reconcile using fresh candidates rather than retaining stale ids', () => {
+  assert.match(source, /getGroupModelCandidates\(own, fetchedForGroup, manualModels, hasFetchedForGroup\)/);
+  assert.match(source, /reconcileUnifiedFetchedGroupModels\(/);
+  assert.match(source, /if \(hasFetchedForGroup\) \{/);
+  assert.match(source, /setGroupModelSelection\(hasFetched \? reconcileFetchedGroupSelection\(own, candidates\)/);
+  assert.match(source, /const fetchedCandidates = new Set\(\[\.\.\.collected\.map\(\(entry\) => entry\.model\), \.\.\.manualModels\]\)/);
+});
+
+
+test('unified fetch replaces fetched groups, preserves explicitly manual models, and leaves failed groups untouched', () => {
+  assert.deepEqual(
+    reconcileUnifiedFetchedGroupModels(
+      ['removed-model', 'manual-model'],
+      ['current-model', 'manual-model'],
+      ['current-model', 'unselected-model'],
+      ['manual-model'],
+      true,
+    ),
+    ['manual-model', 'current-model'],
+  );
+  assert.deepEqual(
+    reconcileUnifiedFetchedGroupModels(['manual-model'], [], ['current-model'], ['manual-model'], true),
+    [],
+    'deselecting a manually configured model must remove it from the group allowlist',
+  );
+  assert.deepEqual(reconcileUnifiedFetchedGroupModels(['saved-model'], [], [], [], false), ['saved-model']);
 });

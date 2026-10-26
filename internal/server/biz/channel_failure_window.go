@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/looplj/axonhub/internal/ent"
@@ -36,6 +37,72 @@ type channelFailureEventSnapshot struct {
 func channelFailureEventHash(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:])
+}
+
+func channelModelSuccessMarkerKey(channelID int, model string) string {
+	return fmt.Sprintf("auto-disable-success-reset:channel:%d:model:%q", channelID, model)
+}
+
+// recordChannelModelSuccessEvent persists the latest successful request time as
+// a reset boundary. Keeping the boundary in the same shared table makes the
+// failure streak consistent across restarts and server instances, and prevents
+// delayed failure reports from before the success from re-entering the window.
+func (svc *ChannelService) recordChannelModelSuccessEvent(ctx context.Context, perf *PerformanceRecord) error {
+	if perf == nil || perf.ChannelID <= 0 || strings.TrimSpace(perf.Model) == "" {
+		return nil
+	}
+
+	successAt := perf.EndTime
+	now := time.Now()
+	if successAt.IsZero() || successAt.After(now) {
+		successAt = now
+	}
+
+	markerKey := channelModelSuccessMarkerKey(perf.ChannelID, perf.Model)
+	markerHash := channelFailureEventHash(markerKey)
+	client := svc.entFromContext(ctx)
+	latest, err := client.ChannelFailureEvent.Query().Where(
+		channelfailureevent.ChannelID(perf.ChannelID),
+		channelfailureevent.Model(perf.Model),
+		channelfailureevent.RuleKeyHash(markerHash),
+	).Order(ent.Desc(channelfailureevent.FieldFailedAt, channelfailureevent.FieldID)).First(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return fmt.Errorf("load channel model success marker: %w", err)
+	}
+	if err == nil {
+		if !successAt.After(latest.FailedAt) {
+			return nil
+		}
+		return client.ChannelFailureEvent.UpdateOneID(latest.ID).SetFailedAt(successAt).Exec(ctx)
+	}
+
+	return client.ChannelFailureEvent.Create().
+		SetChannelID(perf.ChannelID).
+		SetModel(perf.Model).
+		SetRuleKey(markerKey).
+		SetRuleKeyHash(markerHash).
+		SetWindowKey(markerKey).
+		SetWindowKeyHash(markerHash).
+		SetStatusCode(0).
+		SetErrorDetail("").
+		SetFailedAt(successAt).
+		Exec(ctx)
+}
+
+func (svc *ChannelService) latestChannelModelSuccessAt(ctx context.Context, channelID int, model string) (time.Time, error) {
+	markerHash := channelFailureEventHash(channelModelSuccessMarkerKey(channelID, model))
+	marker, err := svc.entFromContext(ctx).ChannelFailureEvent.Query().Where(
+		channelfailureevent.ChannelID(channelID),
+		channelfailureevent.Model(model),
+		channelfailureevent.RuleKeyHash(markerHash),
+	).Order(ent.Desc(channelfailureevent.FieldFailedAt, channelfailureevent.FieldID)).First(ctx)
+	if ent.IsNotFound(err) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load latest channel model success: %w", err)
+	}
+	return marker.FailedAt, nil
 }
 
 // truncateChannelFailureKey keeps the stored plaintext key bounded; truncation
@@ -112,9 +179,17 @@ func (svc *ChannelService) countChannelFailureEvents(ctx context.Context, ruleKe
 // countChannelModelFailureEvents counts failures by channel and original request
 // model across all matching rules, independently of their individual cooldown windows.
 func (svc *ChannelService) countChannelModelFailureEvents(ctx context.Context, channelID int, model string, cutoff time.Time) (channelFailureEventSnapshot, error) {
+	successAt, err := svc.latestChannelModelSuccessAt(ctx, channelID, model)
+	if err != nil {
+		return channelFailureEventSnapshot{}, err
+	}
+	if successAt.After(cutoff) {
+		cutoff = successAt
+	}
 	query := svc.entFromContext(ctx).ChannelFailureEvent.Query().Where(
 		channelfailureevent.ChannelID(channelID),
 		channelfailureevent.Model(model),
+		channelfailureevent.RuleKeyHashNEQ(channelFailureEventHash(channelModelSuccessMarkerKey(channelID, model))),
 		channelfailureevent.FailedAtGT(cutoff),
 	)
 	count, err := query.Count(ctx)
@@ -124,6 +199,7 @@ func (svc *ChannelService) countChannelModelFailureEvents(ctx context.Context, c
 	latest, err := svc.entFromContext(ctx).ChannelFailureEvent.Query().Where(
 		channelfailureevent.ChannelID(channelID),
 		channelfailureevent.Model(model),
+		channelfailureevent.RuleKeyHashNEQ(channelFailureEventHash(channelModelSuccessMarkerKey(channelID, model))),
 		channelfailureevent.FailedAtGT(cutoff),
 	).Order(ent.Desc(channelfailureevent.FieldFailedAt, channelfailureevent.FieldID)).First(ctx)
 	if err != nil && !ent.IsNotFound(err) {
