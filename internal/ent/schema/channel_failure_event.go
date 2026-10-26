@@ -8,10 +8,10 @@ import (
 	"entgo.io/ent/schema/index"
 )
 
-// ChannelFailureEvent stores one auto-disable rule failure per row so the
-// rolling failure window survives restarts and is shared by every server
-// instance. Counting is a plain COUNT over the composite indexes, so concurrent
-// instances merge naturally instead of keeping isolated in-process counters.
+// ChannelFailureEvent stores auto-disable failure rows and per-channel/model
+// success-reset markers so rolling failure windows survive restarts and are
+// shared by every server instance. Counting is a plain COUNT over composite
+// indexes, so instances share counters instead of isolated in-process state.
 type ChannelFailureEvent struct {
 	ent.Schema
 }
@@ -38,6 +38,9 @@ func (ChannelFailureEvent) Indexes() []ent.Index {
 		// for the sixth-failure permanent guard.
 		index.Fields("window_key_hash", "failed_at").
 			StorageKey("channel_failure_events_by_window_key_hash_failed_at"),
+		// The permanent channel/model guard aggregates failures across every rule window.
+		index.Fields("channel_id", "model", "failed_at").
+			StorageKey("channel_failure_events_by_channel_model_failed_at"),
 		// Periodic cleanup deletes everything older than the longest window.
 		index.Fields("failed_at").
 			StorageKey("channel_failure_events_by_failed_at"),

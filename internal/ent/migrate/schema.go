@@ -166,6 +166,11 @@ var (
 				Columns: []*schema.Column{ChannelFailureEventsColumns[8], ChannelFailureEventsColumns[11]},
 			},
 			{
+				Name:    "channel_failure_events_by_channel_model_failed_at",
+				Unique:  false,
+				Columns: []*schema.Column{ChannelFailureEventsColumns[3], ChannelFailureEventsColumns[4], ChannelFailureEventsColumns[11]},
+			},
+			{
 				Name:    "channel_failure_events_by_failed_at",
 				Unique:  false,
 				Columns: []*schema.Column{ChannelFailureEventsColumns[11]},

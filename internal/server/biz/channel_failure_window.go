@@ -73,7 +73,15 @@ func (svc *ChannelService) recordChannelModelSuccessEvent(ctx context.Context, p
 		if !successAt.After(latest.FailedAt) {
 			return nil
 		}
-		return client.ChannelFailureEvent.UpdateOneID(latest.ID).SetFailedAt(successAt).Exec(ctx)
+		// Keep the update monotonic across server instances: the timestamp
+		// comparison must be part of the SQL UPDATE, not only this prior read.
+		return client.ChannelFailureEvent.Update().
+			Where(
+				channelfailureevent.ID(latest.ID),
+				channelfailureevent.FailedAtLT(successAt),
+			).
+			SetFailedAt(successAt).
+			Exec(ctx)
 	}
 
 	return client.ChannelFailureEvent.Create().

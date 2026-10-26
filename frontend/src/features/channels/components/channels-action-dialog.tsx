@@ -919,6 +919,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       setGroupModelSelection([]);
       setGroupModelsSearch('');
       setUnifiedFetchedModels([]);
+      setFetchedGroupModelIndexes([]);
       setModelSourceGroups({});
       setFetchingAllGroups(false);
     }
@@ -1128,6 +1129,9 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const [fetchingAllGroups, setFetchingAllGroups] = useState(false);
   // Flat list of every model gathered by "fetch all", tagged with its group.
   const [unifiedFetchedModels, setUnifiedFetchedModels] = useState<{ model: string; group: string; groupIndex: number }[]>([]);
+  // Successful fetches are tracked separately from returned models so an empty
+  // response is authoritative while a failed request leaves the old group intact.
+  const [fetchedGroupModelIndexes, setFetchedGroupModelIndexes] = useState<number[]>([]);
   const isSubmitting = createChannel.isPending || duplicateChannel.isPending || updateChannelSettings.isPending;
 
   useEffect(() => {
@@ -1924,14 +1928,14 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
     (index: number, refreshedModels?: string[]) => {
       const own = form.getValues(`credentials.keyGroups.${index}.models`) || [];
       const fetchedModels = refreshedModels ?? unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model);
-      const hasFetched = refreshedModels !== undefined || unifiedFetchedModels.some((entry) => entry.groupIndex === index);
+      const hasFetched = refreshedModels !== undefined || fetchedGroupModelIndexes.includes(index);
       const candidates = getGroupModelCandidates(own, fetchedModels, manualModels, hasFetched);
       setActiveGroupModelIndex(index);
       setGroupModelSelection(hasFetched ? reconcileFetchedGroupSelection(own, candidates) : [...own]);
       setGroupModelsSearch('');
       setShowGroupModelsPanel(true);
     },
-    [form, manualModels, unifiedFetchedModels]
+    [form, manualModels, unifiedFetchedModels, fetchedGroupModelIndexes]
   );
 
   // Probe the upstream /models endpoint using one group's own key and write the
@@ -1975,9 +1979,6 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         }
 
         const models = [...new Set(result.models.map((m) => m.id))];
-        if (models.length === 0) {
-          return;
-        }
 
         // The fetch only refreshes the candidate list. Selection remains the
         // group's current model allowlist, so freshly fetched models are not
@@ -1987,6 +1988,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           ...prev.filter((entry) => entry.groupIndex !== index),
           ...models.map((model) => ({ model, group: groupLabel, groupIndex: index })),
         ]);
+        setFetchedGroupModelIndexes((prev) => [...new Set([...prev, index])]);
         setModelSourceGroups((prev) => {
           const next = { ...prev };
           for (const model of models) {
@@ -2028,6 +2030,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
     setFetchingAllGroups(true);
 
     const collected: { model: string; group: string; groupIndex: number }[] = [];
+    const successfulGroupIndexes: number[] = [];
     const sources: Record<string, string[]> = {};
     let failed = 0;
 
@@ -2052,6 +2055,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           continue;
         }
 
+        successfulGroupIndexes.push(index);
         const groupLabel = groupModelLabel(group, index, t);
         for (const id of [...new Set(result.models.map((m) => m.id))]) {
           collected.push({ model: id, group: groupLabel, groupIndex: index });
@@ -2064,12 +2068,13 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     setFetchingAllGroups(false);
 
-    if (collected.length === 0) {
+    if (collected.length === 0 && successfulGroupIndexes.length === 0) {
       toast.error(t('channels.dialogs.fields.keyGroup.fetchAllEmpty'));
       return;
     }
 
     setUnifiedFetchedModels(collected);
+    setFetchedGroupModelIndexes(successfulGroupIndexes);
     setModelSourceGroups((prev) => ({ ...prev, ...sources }));
     const fetchedCandidates = new Set([...collected.map((entry) => entry.model), ...manualModels]);
     const selected = new Set<string>();
@@ -2085,6 +2090,8 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     if (failed > 0) {
       toast.warning(t('channels.dialogs.fields.keyGroup.fetchAllPartial', { failed }));
+    } else if (collected.length === 0) {
+      toast.warning(t('channels.dialogs.fields.keyGroup.fetchAllEmpty'));
     }
   }, [fetchModels, form, isEdit, currentRow, t, manualModels]);
 
@@ -2144,9 +2151,9 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     const own = form.getValues(`credentials.keyGroups.${activeGroupModelIndex}.models`) || [];
     const fetchedForGroup = unifiedFetchedModels.filter((entry) => entry.groupIndex === activeGroupModelIndex).map((entry) => entry.model);
-    const hasFetchedForGroup = unifiedFetchedModels.some((entry) => entry.groupIndex === activeGroupModelIndex);
+    const hasFetchedForGroup = fetchedGroupModelIndexes.includes(activeGroupModelIndex);
     return getGroupModelCandidates(own, fetchedForGroup, manualModels, hasFetchedForGroup);
-  }, [activeGroupModelIndex, unifiedFetchedModels, manualModels, form]);
+  }, [activeGroupModelIndex, unifiedFetchedModels, fetchedGroupModelIndexes, manualModels, form]);
 
   const filteredGroupModelCandidates = useMemo(() => {
     const search = groupModelsSearch.trim().toLowerCase();
@@ -2208,7 +2215,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
     const groups = form.getValues('credentials.keyGroups') || [];
     const nextGroups = groups.map((group, index) => {
       const fetchedForGroup = unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model);
-      const hasFetchedForGroup = unifiedFetchedModels.some((entry) => entry.groupIndex === index);
+      const hasFetchedForGroup = fetchedGroupModelIndexes.includes(index);
       const models = reconcileUnifiedFetchedGroupModels(
         group.models || [],
         [...(byGroup.get(index) || [])],
@@ -2227,7 +2234,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     setSupportedModels(reconcileGroupedSupportedModels(nextGroups, manualModels));
     closeGroupModelsPanel();
-  }, [activeGroupModelIndex, closeGroupModelsPanel, form, groupModelSelection, manualModels, unifiedFetchedModels]);
+  }, [activeGroupModelIndex, closeGroupModelsPanel, form, groupModelSelection, manualModels, unifiedFetchedModels, fetchedGroupModelIndexes]);
 
   return (
     <>
@@ -2937,6 +2944,19 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                     'credentials.keyGroups',
                                     current.filter((_, i) => i !== index),
                                     { shouldDirty: true, shouldValidate: true }
+                                  );
+                                  setUnifiedFetchedModels((prev) =>
+                                    prev
+                                      .filter((entry) => entry.groupIndex !== index)
+                                      .map((entry) => ({
+                                        ...entry,
+                                        groupIndex: entry.groupIndex > index ? entry.groupIndex - 1 : entry.groupIndex,
+                                      }))
+                                  );
+                                  setFetchedGroupModelIndexes((prev) =>
+                                    prev.filter((groupIndex) => groupIndex !== index).map((groupIndex) =>
+                                      groupIndex > index ? groupIndex - 1 : groupIndex
+                                    )
                                   );
                                 }}
                                 onChangeName={(index, name) => {

@@ -283,6 +283,20 @@ func TestChannelService_WindowIgnoresLateFailureCompletedBeforeSuccess(t *testin
 	require.True(t, acted, "only post-success failures contribute")
 }
 
+func TestChannelService_SuccessResetBoundaryNeverMovesBackward(t *testing.T) {
+	ctx, svc, ch := newWindowRuleTestService(t, objects.APIKeyAutoDisableRule{Times: 2, Action: objects.APIKeyAutoDisableActionPermanent})
+	base := time.Now().Add(-time.Minute)
+	svc.clearAutoDisableCountsOnSuccess(ctx, &PerformanceRecord{
+		ChannelID: ch.ID, Model: "gpt-4", Success: true, EndTime: base.Add(2 * time.Second),
+	})
+	svc.clearAutoDisableCountsOnSuccess(ctx, &PerformanceRecord{
+		ChannelID: ch.ID, Model: "gpt-4", Success: true, EndTime: base.Add(time.Second),
+	})
+	latest, err := svc.latestChannelModelSuccessAt(ctx, ch.ID, "gpt-4")
+	require.NoError(t, err)
+	require.WithinDuration(t, base.Add(2*time.Second), latest, time.Microsecond)
+}
+
 func TestChannelService_WindowKeylessSuccessDoesNotClearOtherModelHistory(t *testing.T) {
 	rule := objects.APIKeyAutoDisableRule{Times: 2, FreezeModel: true,
 		Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: lo.ToPtr(15)}

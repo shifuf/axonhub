@@ -134,6 +134,7 @@ test('a fresh fetch prunes unsupported saved selections but keeps an explicit ma
     'current-model',
     'manual-model',
   ]);
+  assert.deepEqual(getGroupModelCandidates(['stale-model'], [], [], true), [], 'successful empty fetch prunes stale provider models');
 });
 
 test('before fetching, a group picker still shows its saved selection', () => {
@@ -146,6 +147,11 @@ test('group and unified-fetch model flows reconcile using fresh candidates rathe
   assert.match(source, /if \(hasFetchedForGroup\) \{/);
   assert.match(source, /setGroupModelSelection\(hasFetched \? reconcileFetchedGroupSelection\(own, candidates\)/);
   assert.match(source, /const fetchedCandidates = new Set\(\[\.\.\.collected\.map\(\(entry\) => entry\.model\), \.\.\.manualModels\]\)/);
+  assert.match(source, /successfulGroupIndexes\.push\(index\)/);
+  assert.match(source, /setFetchedGroupModelIndexes\(successfulGroupIndexes\)/);
+  assert.match(source, /groupIndex: entry\.groupIndex > index \? entry\.groupIndex - 1 : entry\.groupIndex/);
+  assert.doesNotMatch(source, /if \(models\.length === 0\) \{\s*return;/);
+  assert.match(source, /setFetchedGroupModelIndexes\(\(prev\)/);
 });
 
 
@@ -166,4 +172,5 @@ test('unified fetch replaces fetched groups, preserves explicitly manual models,
     'deselecting a manually configured model must remove it from the group allowlist',
   );
   assert.deepEqual(reconcileUnifiedFetchedGroupModels(['saved-model'], [], [], [], false), ['saved-model']);
+  assert.deepEqual(reconcileUnifiedFetchedGroupModels(['stale-model'], [], [], [], true), [], 'successful empty fetch prunes stale group models');
 });
