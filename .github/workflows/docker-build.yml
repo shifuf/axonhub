@@ -132,6 +132,10 @@ jobs:
 
       - name: Build image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # Test builds must not upload build records or publish build summaries.
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ inputs.mode != 'test' }}
+          DOCKER_BUILD_SUMMARY: ${{ inputs.mode != 'test' }}
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -142,6 +146,7 @@ jobs:
           cache-from: |
             type=gha,scope=axonhub-${{ matrix.arch }}
             type=gha,scope=axonhub-pr-${{ matrix.arch }}
-          cache-to: type=gha,mode=${{ inputs.mode == 'test' && 'min' || 'max' }},scope=${{ inputs.mode == 'test' && 'axonhub-pr' || 'axonhub' }}-${{ matrix.arch }}
+          # Test builds may read cache but must never upload one.
+          cache-to: ${{ inputs.mode != 'test' && format('type=gha,mode=max,scope=axonhub-{0}', matrix.arch) || '' }}
           provenance: false
           sbom: false
