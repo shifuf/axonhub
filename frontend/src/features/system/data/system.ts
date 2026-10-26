@@ -124,6 +124,7 @@ const RETRY_POLICY_QUERY = `
       autoDisableChannel {
         enabled
         permanentFailureThreshold
+        permanentFailureWindowMinutes
         rules {
           statusCodes
           keywordPatterns
@@ -338,6 +339,7 @@ export interface AutoDisableChannel {
   enabled: boolean;
   rules: APIKeyAutoDisableRule[];
   permanentFailureThreshold: number;
+  permanentFailureWindowMinutes: number;
 }
 
 export interface WebhookHeader {
@@ -389,6 +391,7 @@ export interface AutoDisableChannelInput {
   enabled?: boolean;
   rules?: APIKeyAutoDisableRule[];
   permanentFailureThreshold?: number;
+  permanentFailureWindowMinutes?: number;
 }
 
 export type ClientCancellationAction = 'switch_and_cooldown' | 'cooldown_only' | 'cooldown_model';

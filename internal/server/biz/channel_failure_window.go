@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	// maxAutoDisableWindowMinutes matches the GraphQL validation upper bound of
-	// the auto-disable rule window (7 days).
+	// maxAutoDisableWindowMinutes matches the maximum rule and permanent-freeze
+	// windows (7 days).
 	maxAutoDisableWindowMinutes = 10080
 	// channelFailureEventRetention keeps a full extra day beyond the longest
 	// window so clock skew between instances cannot drop countable failures.
@@ -107,6 +107,29 @@ func (svc *ChannelService) countChannelFailureEvents(ctx context.Context, ruleKe
 	}
 
 	return channelFailureEventSnapshot{ruleCount: ruleCount, windowTotal: windowTotal, latest: latest}, nil
+}
+
+// countChannelModelFailureEvents counts failures by channel and original request
+// model across all matching rules, independently of their individual cooldown windows.
+func (svc *ChannelService) countChannelModelFailureEvents(ctx context.Context, channelID int, model string, cutoff time.Time) (channelFailureEventSnapshot, error) {
+	query := svc.entFromContext(ctx).ChannelFailureEvent.Query().Where(
+		channelfailureevent.ChannelID(channelID),
+		channelfailureevent.Model(model),
+		channelfailureevent.FailedAtGT(cutoff),
+	)
+	count, err := query.Count(ctx)
+	if err != nil {
+		return channelFailureEventSnapshot{}, fmt.Errorf("count channel model failures: %w", err)
+	}
+	latest, err := svc.entFromContext(ctx).ChannelFailureEvent.Query().Where(
+		channelfailureevent.ChannelID(channelID),
+		channelfailureevent.Model(model),
+		channelfailureevent.FailedAtGT(cutoff),
+	).Order(ent.Desc(channelfailureevent.FieldFailedAt, channelfailureevent.FieldID)).First(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return channelFailureEventSnapshot{}, fmt.Errorf("load latest channel model failure: %w", err)
+	}
+	return channelFailureEventSnapshot{windowTotal: count, latest: latest}, nil
 }
 
 // performanceRecordFromFailureEvent rebuilds enough of the original record for

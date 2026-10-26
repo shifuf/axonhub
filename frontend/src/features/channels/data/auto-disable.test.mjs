@@ -149,7 +149,7 @@ test('channel and retry-policy GraphQL selections load the new auto-disable fiel
     assert.match(selection, /apiKeyAutoDisableRules/, 'channel policies selection should include rules');
   }
 
-  assert.match(systemData, /autoDisableChannel \{\s*enabled\s*(?:permanentFailureThreshold\s*)?rules \{/, 'retryPolicy query should request rules, not statuses');
+  assert.match(systemData, /autoDisableChannel \{[\s\S]*?permanentFailureWindowMinutes[\s\S]*?rules \{/, 'retryPolicy query should request rules, not statuses');
   assert.doesNotMatch(systemData, /autoDisableChannel \{\s*enabled\s*statuses/, 'retryPolicy query must not request removed statuses');
   assert.match(retrySettings, /RECOMMENDED_GLOBAL_AUTO_DISABLE_RULES/, 'retry settings should insert the shared recommended rules');
   for (const path of ['features/channels/components/api-key-auto-disable-rules-editor.tsx', 'features/channels/components/channels-availability-dialog.tsx', 'features/channels/components/channels-bulk-auto-disable-dialog.tsx', 'features/system/components/retry-settings.tsx']) {

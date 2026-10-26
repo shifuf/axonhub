@@ -41,6 +41,7 @@ const CLIENT_CANCELLATION_COOLDOWN_PRESETS = [5, 10, 20, 30, 60] as const;
 // Mirrors the backend safeguard default: AutoDisableChannel.PermanentFailureThreshold
 // falls back to 6 (range 1-1000, enforced again on submit and server-side).
 const DEFAULT_PERMANENT_FAILURE_THRESHOLD = 6;
+const DEFAULT_PERMANENT_FAILURE_WINDOW_MINUTES = 24 * 60;
 
 // Keep cancellation evidence gates, scope and project overrides intact. This is
 // deliberately separate from error rules and their permanent model-freeze safeguard.
@@ -200,6 +201,7 @@ export function RetrySettings() {
       enabled: false,
       rules: [],
       permanentFailureThreshold: DEFAULT_PERMANENT_FAILURE_THRESHOLD,
+      permanentFailureWindowMinutes: DEFAULT_PERMANENT_FAILURE_WINDOW_MINUTES,
     },
     clientCancellationPolicy: {
       enabled: true,
@@ -233,6 +235,8 @@ export function RetrySettings() {
           rules: toApiKeyAutoDisableRuleFormValues(retryPolicy.autoDisableChannel?.rules),
           permanentFailureThreshold:
             retryPolicy.autoDisableChannel?.permanentFailureThreshold ?? DEFAULT_PERMANENT_FAILURE_THRESHOLD,
+          permanentFailureWindowMinutes:
+            retryPolicy.autoDisableChannel?.permanentFailureWindowMinutes ?? DEFAULT_PERMANENT_FAILURE_WINDOW_MINUTES,
         },
         clientCancellationPolicy: modelOnlyClientCancellationPolicy({
           ...retryPolicy.clientCancellationPolicy,
@@ -271,7 +275,7 @@ export function RetrySettings() {
   }, []);
 
   const handleAutoDisableChannelChange = useCallback(
-    (field: 'enabled' | 'permanentFailureThreshold', value: boolean | number) => {
+    (field: 'enabled' | 'permanentFailureThreshold' | 'permanentFailureWindowMinutes', value: boolean | number) => {
       setFormData((prev) => ({
         ...prev,
         autoDisableChannel: {
@@ -403,6 +407,13 @@ export function RetrySettings() {
           // Inline clamp: the submit path must stay dependency-free for the unit
           // harness. 0/missing falls back to the backend default of 6; cap at 1000.
           permanentFailureThreshold: Math.min(1000, Math.max(1, Number(formData.autoDisableChannel?.permanentFailureThreshold) || 6)),
+          permanentFailureWindowMinutes: Math.min(
+            10080,
+            Math.max(
+              1,
+              Number(formData.autoDisableChannel?.permanentFailureWindowMinutes) || DEFAULT_PERMANENT_FAILURE_WINDOW_MINUTES
+            )
+          ),
         },
       });
     },
@@ -666,6 +677,37 @@ export function RetrySettings() {
                         handleAutoDisableChannelChange('permanentFailureThreshold', parseInt(e.target.value, 10) || 0)
                       }
                     />
+                  </div>
+                )}
+
+                {formData.autoDisableChannel?.enabled && (
+                  <div className='space-y-2'>
+                    <Label htmlFor='auto-disable-permanent-window'>
+                      {t('system.retry.autoDisableChannel.permanentWindow.label')}
+                    </Label>
+                    <div className='text-muted-foreground text-sm'>
+                      {t('system.retry.autoDisableChannel.permanentWindow.description')}
+                    </div>
+                    <div className='flex items-center gap-2'>
+                      <Input
+                        id='auto-disable-permanent-window'
+                        type='number'
+                        min={1}
+                        max={168}
+                        className='w-32'
+                        value={Math.ceil((formData.autoDisableChannel?.permanentFailureWindowMinutes ?? DEFAULT_PERMANENT_FAILURE_WINDOW_MINUTES) / 60)}
+                        onChange={(e) => {
+                          if (!e.target.value.trim()) return;
+                          handleAutoDisableChannelChange(
+                            'permanentFailureWindowMinutes',
+                            Math.max(1, parseInt(e.target.value, 10) || 1) * 60
+                          );
+                        }}
+                      />
+                      <span className='text-muted-foreground text-sm'>
+                        {t('system.retry.autoDisableChannel.permanentWindow.hours')}
+                      </span>
+                    </div>
                   </div>
                 )}
 

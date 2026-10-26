@@ -44,7 +44,7 @@ test('retry submit canonicalizes cancellation actions and preserves non-cancella
   const payloads = [];
   const formData = {
     enabled: true, retryDelayMs: 1234, emptyResponseDetection: true,
-    autoDisableChannel: { enabled: true, rules: helpers.toApiKeyAutoDisableRuleFormValues([{ statusCodes: [401], times: 8, action: 'permanent_disable_delete', windowMinutes: 0 }]) },
+    autoDisableChannel: { enabled: true, permanentFailureWindowMinutes: 360, rules: helpers.toApiKeyAutoDisableRuleFormValues([{ statusCodes: [401], times: 8, action: 'permanent_disable_delete', windowMinutes: 0 }]) },
     clientCancellationPolicy: {
       enabled: true, threshold: 4, windowMinutes: 17, cooldownMinutes: 47, scope: 'project_first', action: 'cooldown_only',
       evidenceGate: { enabled: true },
@@ -58,7 +58,7 @@ test('retry submit canonicalizes cancellation actions and preserves non-cancella
     modelOnlyClientCancellationPolicy: normalize, toast: { error() {} }, t: (key) => key,
   })({ preventDefault() {} });
   assert.equal(payloads.length, 1);
-  assert.deepEqual(payloads[0], { ...formData, autoDisableChannel: { enabled: true, rules: helpers.serializeApiKeyAutoDisableRules(formData.autoDisableChannel.rules), permanentFailureThreshold: 6 }, clientCancellationPolicy: normalize(formData.clientCancellationPolicy) });
+  assert.deepEqual(payloads[0], { ...formData, autoDisableChannel: { enabled: true, rules: helpers.serializeApiKeyAutoDisableRules(formData.autoDisableChannel.rules), permanentFailureThreshold: 6, permanentFailureWindowMinutes: 360 }, clientCancellationPolicy: normalize(formData.clientCancellationPolicy) });
 });
 
 test('new project overrides stay model-only and preserve inherited timing', () => {
@@ -81,3 +81,15 @@ for (const language of ['en', 'zh-CN']) {
     assert.doesNotMatch(action + cooldown, language === 'en' ? /disable.*(?:credential|entire channel)|channel or credential/i : /只禁用|禁用整个渠道|渠道或凭据/);
   });
 }
+
+test('permanent freeze window is exposed in the GraphQL request, settings UI, and both locales', () => {
+  const dataSource = readSource('features/system/data/system.ts');
+  assert.match(dataSource, /permanentFailureWindowMinutes/);
+  assert.match(source, /DEFAULT_PERMANENT_FAILURE_WINDOW_MINUTES = 24 \* 60/);
+  assert.match(source, /auto-disable-permanent-window/);
+  for (const language of ['en', 'zh-CN']) {
+    const locale = JSON.parse(readSource(`locales/${language}/system.json`));
+    assert.ok(locale['system.retry.autoDisableChannel.permanentWindow.label']);
+    assert.ok(locale['system.retry.autoDisableChannel.permanentWindow.description']);
+  }
+});

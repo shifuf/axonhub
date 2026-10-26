@@ -96,7 +96,8 @@ var defaultRetryPolicy = RetryPolicy{
 		ProjectOverrides: []ClientCancellationProjectPolicy{},
 	},
 	AutoDisableChannel: AutoDisableChannel{
-		PermanentFailureThreshold: defaultPermanentModelFailureThreshold,
+		PermanentFailureThreshold:     defaultPermanentModelFailureThreshold,
+		PermanentFailureWindowMinutes: defaultPermanentModelFailureWindowMinutes,
 	},
 }
 

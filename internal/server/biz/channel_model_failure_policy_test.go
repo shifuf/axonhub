@@ -84,7 +84,7 @@ func TestChannelService_ModelFailurePolicySixthFailureEscalatesWithoutConsumingW
 			require.Len(t, stored.ModelCooldowns, 1)
 			require.Nil(t, stored.ModelCooldowns[0].ExpiresAt, "safeguard freeze requires manual recovery")
 			require.Contains(t, stored.ModelCooldowns[0].Reason, "gpt-4")
-			require.Contains(t, stored.ModelCooldowns[0].Reason, "6 failures within 10 minutes")
+			require.Contains(t, stored.ModelCooldowns[0].Reason, "6 failures within 1440 minutes")
 			require.Contains(t, stored.ModelCooldowns[0].Reason, "provider failure 6")
 		}
 	}
@@ -101,7 +101,7 @@ func TestChannelService_ModelFailurePolicyDifferentRulesSharePairWindowEscalatio
 			code = 429
 		}
 		svc.evaluateRules(ctx, &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: code},
-			[]objects.APIKeyAutoDisableRule{first, second}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold)
+			[]objects.APIKeyAutoDisableRule{first, second}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold, defaultPermanentModelFailureWindowMinutes)
 	}
 	stored, err := svc.db.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
@@ -250,7 +250,7 @@ func TestDefaultRetryPolicyUsesModelOnlyCancellation(t *testing.T) {
 	require.Equal(t, defaultClientCancellationWindowMinutes, defaultRetryPolicy.ClientCancellationPolicy.WindowMinutes)
 }
 
-func TestChannelService_ModelFailurePolicyExpiresBurstAndSeparatesWindowSizes(t *testing.T) {
+func TestChannelService_PermanentWindowAggregatesRuleWindowsAndExpiresBurst(t *testing.T) {
 	rule := objects.APIKeyAutoDisableRule{Times: 100, WindowMinutes: 1, Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: lo.ToPtr(5)}
 	ctx, svc, ch := newWindowRuleTestService(t, rule)
 	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 503}
@@ -258,7 +258,7 @@ func TestChannelService_ModelFailurePolicyExpiresBurstAndSeparatesWindowSizes(t 
 		svc.evaluateAutoDisableForFailure(ctx, perf)
 	}
 	// Seed expired evidence instead of sleeping for a minute.
-	old := time.Now().Add(-2 * time.Minute)
+	old := time.Now().Add(-25 * time.Hour)
 	_, err := svc.db.ChannelFailureEvent.Update().
 		Where(channelfailureevent.ChannelID(ch.ID)).
 		SetFailedAt(old).
@@ -271,16 +271,20 @@ func TestChannelService_ModelFailurePolicyExpiresBurstAndSeparatesWindowSizes(t 
 	require.Empty(t, stored.ModelCooldowns)
 	longer := rule
 	longer.WindowMinutes = 10
-	for range 5 {
-		svc.evaluateRules(ctx, perf, []objects.APIKeyAutoDisableRule{longer}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold)
+	for range 4 {
+		svc.evaluateRules(ctx, perf, []objects.APIKeyAutoDisableRule{longer}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold, defaultPermanentModelFailureWindowMinutes)
 	}
 	stored, err = svc.db.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Equal(t, channel.StatusEnabled, stored.Status, "one failure in a 1-minute rule plus five in a 10-minute rule is not six in the same window")
-	svc.evaluateRules(ctx, perf, []objects.APIKeyAutoDisableRule{longer}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold)
+	require.Equal(t, channel.StatusEnabled, stored.Status)
+	require.Empty(t, stored.ModelCooldowns)
+
+	// One current failure in the 1-minute rule and five in the 10-minute rule
+	// jointly reach the configured 24-hour permanent-freeze threshold.
+	svc.evaluateRules(ctx, perf, []objects.APIKeyAutoDisableRule{longer}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold, defaultPermanentModelFailureWindowMinutes)
 	stored, err = svc.db.Channel.Get(ctx, ch.ID)
 	require.NoError(t, err)
-	require.Equal(t, channel.StatusEnabled, stored.Status, "the safeguard freezes the model even when a normal threshold is higher than the safeguard")
+	require.Equal(t, channel.StatusEnabled, stored.Status, "permanent freeze must not disable the whole channel")
 	require.Len(t, stored.ModelCooldowns, 1)
 	require.Nil(t, stored.ModelCooldowns[0].ExpiresAt)
 }
@@ -372,6 +376,6 @@ func TestChannelService_ModelFailurePolicyLatchesSixthDuringInflightCooldown(t *
 	require.Len(t, stored.ModelCooldowns, 1)
 	require.Nil(t, stored.ModelCooldowns[0].ExpiresAt)
 	require.Empty(t, stored.DisabledAPIKeys)
-	require.Contains(t, stored.ModelCooldowns[0].Reason, "6 failures within 1 minutes")
+	require.Contains(t, stored.ModelCooldowns[0].Reason, "6 failures within 1440 minutes")
 	require.Contains(t, stored.ModelCooldowns[0].Reason, "failure6")
 }

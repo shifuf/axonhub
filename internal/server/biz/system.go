@@ -434,6 +434,10 @@ type AutoDisableChannel struct {
 	// manual recovery. 0/missing falls back to defaultPermanentModelFailureThreshold.
 	PermanentFailureThreshold int `json:"permanent_failure_threshold"`
 
+	// PermanentFailureWindowMinutes is the independent rolling window used by
+	// the permanent model-freeze escalation safeguard. 0 uses the 24-hour default.
+	PermanentFailureWindowMinutes int `json:"permanent_failure_window_minutes"`
+
 	// Statuses is read-only compatibility for legacy retry_policy JSON. It is
 	// migrated into Rules by normalizeRetryPolicy and never written back.
 	Statuses []AutoDisableChannelStatus `json:"statuses,omitempty"`
@@ -1128,6 +1132,11 @@ func (s *SystemService) SetRetryPolicy(ctx context.Context, policy *RetryPolicy)
 			"auto-disable permanent failure threshold must be between 1 and %d (0 uses the default %d)",
 			maxPermanentModelFailureThreshold, defaultPermanentModelFailureThreshold))
 	}
+	if policy.AutoDisableChannel.PermanentFailureWindowMinutes < 0 || policy.AutoDisableChannel.PermanentFailureWindowMinutes > maxPermanentModelFailureWindowMinutes {
+		return xerrors.ValidationError(fmt.Sprintf(
+			"auto-disable permanent failure window must be between 1 and %d minutes (0 uses the default %d)",
+			maxPermanentModelFailureWindowMinutes, defaultPermanentModelFailureWindowMinutes))
+	}
 	normalizeRetryPolicy(policy)
 
 	rules, err := normalizeAutoDisableRules(policy.AutoDisableChannel.Rules, false)
@@ -1215,6 +1224,12 @@ func normalizeRetryPolicy(policy *RetryPolicy) {
 	}
 	if policy.AutoDisableChannel.PermanentFailureThreshold > maxPermanentModelFailureThreshold {
 		policy.AutoDisableChannel.PermanentFailureThreshold = maxPermanentModelFailureThreshold
+	}
+	if policy.AutoDisableChannel.PermanentFailureWindowMinutes <= 0 {
+		policy.AutoDisableChannel.PermanentFailureWindowMinutes = defaultRetryPolicy.AutoDisableChannel.PermanentFailureWindowMinutes
+	}
+	if policy.AutoDisableChannel.PermanentFailureWindowMinutes > maxPermanentModelFailureWindowMinutes {
+		policy.AutoDisableChannel.PermanentFailureWindowMinutes = maxPermanentModelFailureWindowMinutes
 	}
 
 	// Normalization here is best-effort for reads of legacy configs. Invalid

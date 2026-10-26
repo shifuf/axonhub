@@ -66,7 +66,7 @@ func TestChannelService_WindowLegacyActionsPreserveCredentials(t *testing.T) {
 		t.Run(string(action), func(t *testing.T) {
 			rule := objects.APIKeyAutoDisableRule{Times: 1, WindowMinutes: 10, Action: action, DisableDurationMinutes: lo.ToPtr(15), DisableUntilCron: "0 0 * * *"}
 			ctx, svc, ch := newWindowRuleTestService(t, rule)
-			_, acted := svc.evaluateRules(ctx, &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", Model: "gpt-4", ResponseStatusCode: 500}, []objects.APIKeyAutoDisableRule{rule}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold)
+			_, acted := svc.evaluateRules(ctx, &PerformanceRecord{ChannelID: ch.ID, APIKey: "key1", Model: "gpt-4", ResponseStatusCode: 500}, []objects.APIKeyAutoDisableRule{rule}, autoDisableScopeChannel, defaultPermanentModelFailureThreshold, defaultPermanentModelFailureWindowMinutes)
 			require.True(t, acted)
 			updated, err := svc.db.Channel.Get(ctx, ch.ID)
 			require.NoError(t, err)

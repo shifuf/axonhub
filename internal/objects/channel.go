@@ -868,10 +868,10 @@ const (
 )
 
 // APIKeyAutoDisableRule retains its historical wire name for compatibility.
-// Automatic actions always count failures per channel/original-request-model
-// in a rolling window and temporarily freeze that model. They never disable
-// credentials; the sixth failure in the same pair/window permanently disables
-// the whole channel as the sole escalation exception.
+// Automatic actions count failures per channel/original-request-model and
+// temporarily freeze that model. A separate retry-policy rolling window can
+// permanently freeze the model after its configured failure threshold. They
+// never disable credentials or the whole channel.
 type APIKeyAutoDisableRule struct {
 	StatusCodes     []int                   `json:"statusCodes,omitempty"`
 	KeywordPatterns []string                `json:"keywordPatterns,omitempty"`

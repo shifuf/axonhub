@@ -415,6 +415,13 @@ type KeyGroupFormRow = {
 // so this returns an empty list and the plain apiKeys editor stays in use. Groups
 // stored before a group could hold several keys carry a single apiKey, which is
 // folded into the key list here.
+function reconcileGroupedSupportedModels(
+  groups: Array<{ models?: string[] | null }>,
+  manualModels: string[]
+): string[] {
+  return [...new Set([...manualModels, ...groups.flatMap((group) => group.models || [])])];
+}
+
 function normalizeKeyGroupsFromCredentials(
   credentials?: {
     apiKey?: string | null;
@@ -1642,9 +1649,14 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
             : { ...submittedCredentials, vertexApiKeys: undefined }
           : { ...submittedCredentials, vertexApiKeys: undefined };
 
+      const submittedKeyGroups = valuesForSubmit.credentials?.keyGroups || [];
+      const resolvedSupportedModels =
+        submittedKeyGroups.length > 0
+          ? reconcileGroupedSupportedModels(submittedKeyGroups, manualModels)
+          : supportedModels;
       const dataWithModels = {
         ...valuesForSubmit,
-        supportedModels,
+        supportedModels: resolvedSupportedModels,
         manualModels,
         credentials: credentials
           ? getCodexThirdPartySubmitCredentials(credentials, {
@@ -2144,11 +2156,15 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
   const applyGroupModelSelection = useCallback(() => {
     if (activeGroupModelIndex !== null) {
+      const groups = form.getValues('credentials.keyGroups') || [];
+      const nextGroups = groups.map((group, index) =>
+        index === activeGroupModelIndex ? { ...group, models: [...groupModelSelection] } : group
+      );
       form.setValue(`credentials.keyGroups.${activeGroupModelIndex}.models`, [...groupModelSelection], {
         shouldDirty: true,
         shouldValidate: true,
       });
-      setSupportedModels((prev) => [...new Set([...prev, ...groupModelSelection])]);
+      setSupportedModels(reconcileGroupedSupportedModels(nextGroups, manualModels));
       closeGroupModelsPanel();
       return;
     }
@@ -2160,20 +2176,22 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       byGroup.get(entry.groupIndex)!.add(entry.model);
     }
 
-    const nextSupported = new Set(supportedModels);
-    for (const [index, models] of byGroup) {
-      const current = form.getValues(`credentials.keyGroups.${index}.models`) || [];
-      const merged = [...new Set([...current, ...models])];
-      form.setValue(`credentials.keyGroups.${index}.models`, merged, {
+    const groups = form.getValues('credentials.keyGroups') || [];
+    const nextGroups = groups.map((group, index) => {
+      const fetchedForGroup = new Set(unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model));
+      const selectedForGroup = [...(byGroup.get(index) || [])];
+      const preservedManual = (group.models || []).filter((model) => !fetchedForGroup.has(model));
+      const models = [...new Set([...preservedManual, ...selectedForGroup])];
+      form.setValue(`credentials.keyGroups.${index}.models`, models, {
         shouldDirty: true,
         shouldValidate: true,
       });
-      models.forEach((model) => nextSupported.add(model));
-    }
+      return { ...group, models };
+    });
 
-    setSupportedModels([...nextSupported]);
+    setSupportedModels(reconcileGroupedSupportedModels(nextGroups, manualModels));
     closeGroupModelsPanel();
-  }, [activeGroupModelIndex, closeGroupModelsPanel, form, groupModelSelection, supportedModels, unifiedFetchedModels]);
+  }, [activeGroupModelIndex, closeGroupModelsPanel, form, groupModelSelection, manualModels, unifiedFetchedModels]);
 
   return (
     <>

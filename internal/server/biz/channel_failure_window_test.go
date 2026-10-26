@@ -145,3 +145,25 @@ func TestChannelService_CustomPermanentModelFreezeThreshold(t *testing.T) {
 	require.Nil(t, stored.ModelCooldowns[0].ExpiresAt, "the safeguard upgrade is permanent")
 	require.Contains(t, stored.ModelCooldowns[0].Reason, "threshold 3")
 }
+
+// The permanent-freeze safeguard uses its own configurable rolling window,
+// independent of the matched rule's temporary-cooldown window.
+func TestChannelService_PermanentFreezeUsesConfiguredWindow(t *testing.T) {
+	rule := objects.APIKeyAutoDisableRule{Times: 100, WindowMinutes: 7 * 24 * 60, FreezeModel: true,
+		Action: objects.APIKeyAutoDisableActionTemporary, DisableDurationMinutes: lo.ToPtr(15)}
+	ctx, svc, ch := newWindowRuleTestService(t, rule)
+	require.NoError(t, svc.SystemService.SetRetryPolicy(ctx, &RetryPolicy{
+		AutoDisableChannel: AutoDisableChannel{
+			PermanentFailureThreshold:     2,
+			PermanentFailureWindowMinutes: 24 * 60,
+		},
+	}))
+	perf := &PerformanceRecord{ChannelID: ch.ID, Model: "gpt-4", APIKey: "key1", ResponseStatusCode: 500}
+	insertChannelFailureEventForTest(t, svc, ctx, perf, autoDisableScopeChannel, 0, rule, time.Now().Add(-25*time.Hour))
+
+	_, acted := svc.evaluateAutoDisableForFailure(ctx, perf)
+	require.False(t, acted, "a failure outside the permanent-freeze window must not count toward escalation")
+	updated, err := svc.db.Channel.Get(ctx, ch.ID)
+	require.NoError(t, err)
+	require.Empty(t, updated.ModelCooldowns, "the ordinary rule threshold is not reached either")
+}

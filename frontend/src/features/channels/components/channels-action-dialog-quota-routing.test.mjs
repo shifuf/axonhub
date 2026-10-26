@@ -9,9 +9,9 @@ const dialogPath = new URL('./channels-action-dialog.tsx', import.meta.url);
 const source = readFileSync(dialogPath, 'utf8');
 const ast = ts.createSourceFile('channels-action-dialog.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 
-const helperNames = ['recallQuotaRoutingMode', 'quotaRoutingModeSettingsPatch'];
+const helperNames = ['recallQuotaRoutingMode', 'quotaRoutingModeSettingsPatch', 'reconcileGroupedSupportedModels'];
 const helperNodes = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && helperNames.includes(node.name?.text));
-assert.equal(helperNodes.length, 2, 'mapping helpers must stay in channels-action-dialog.tsx');
+assert.equal(helperNodes.length, 3, 'mapping helpers must stay in channels-action-dialog.tsx');
 const helpers = helperNodes.map((node) => `export ${node.getText(ast).replace(/^export\s+/, '')}`).join('\n');
 
 function loadTsModule(sourceText) {
@@ -21,7 +21,7 @@ function loadTsModule(sourceText) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 }
 
-const { recallQuotaRoutingMode, quotaRoutingModeSettingsPatch } = await loadTsModule(helpers);
+const { recallQuotaRoutingMode, quotaRoutingModeSettingsPatch, reconcileGroupedSupportedModels } = await loadTsModule(helpers);
 
 // Type-only imports are erased, so utils/merge.ts loads standalone.
 const mergeSource = readFileSync(new URL('../utils/merge.ts', import.meta.url), 'utf8');
@@ -86,4 +86,18 @@ test('mapping helpers stay wired into the dialog payload boundaries', () => {
 test('inherit option includes the current global mode when available', () => {
   assert.match(source, /quotaRoutingMode\.options\.INHERIT_WITH_MODE/);
   assert.match(source, /quotaRoutingSettings\.defaultMode/);
+});
+
+
+test('group selection replaces stale grouped models while retaining manually added models', () => {
+  const result = reconcileGroupedSupportedModels(
+    [{ models: ['gpt-6-luna'] }, { models: ['gpt-5.6-luna'] }],
+    ['manual-model'],
+  );
+  assert.deepEqual(result, ['manual-model', 'gpt-6-luna', 'gpt-5.6-luna']);
+});
+
+test('saving uses the reconciled key-group model list for channel model options', () => {
+  assert.match(source, /supportedModels: resolvedSupportedModels/);
+  assert.match(source, /reconcileGroupedSupportedModels\(submittedKeyGroups, manualModels\)/);
 });

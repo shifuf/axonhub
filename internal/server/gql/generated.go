@@ -306,9 +306,10 @@ type ComplexityRoot struct {
 	}
 
 	AutoDisableChannel struct {
-		Enabled                   func(childComplexity int) int
-		PermanentFailureThreshold func(childComplexity int) int
-		Rules                     func(childComplexity int) int
+		Enabled                       func(childComplexity int) int
+		PermanentFailureThreshold     func(childComplexity int) int
+		PermanentFailureWindowMinutes func(childComplexity int) int
+		Rules                         func(childComplexity int) int
 	}
 
 	AutoDisableChannelOnboarding struct {
@@ -3508,6 +3509,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.AutoDisableChannel.PermanentFailureThreshold(childComplexity), true
+	case "AutoDisableChannel.permanentFailureWindowMinutes":
+		if e.complexity.AutoDisableChannel.PermanentFailureWindowMinutes == nil {
+			break
+		}
+
+		return e.complexity.AutoDisableChannel.PermanentFailureWindowMinutes(childComplexity), true
 	case "AutoDisableChannel.rules":
 		if e.complexity.AutoDisableChannel.Rules == nil {
 			break
@@ -20472,6 +20479,35 @@ func (ec *executionContext) _AutoDisableChannel_permanentFailureThreshold(ctx co
 }
 
 func (ec *executionContext) fieldContext_AutoDisableChannel_permanentFailureThreshold(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "AutoDisableChannel",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _AutoDisableChannel_permanentFailureWindowMinutes(ctx context.Context, field graphql.CollectedField, obj *biz.AutoDisableChannel) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_AutoDisableChannel_permanentFailureWindowMinutes,
+		func(ctx context.Context) (any, error) {
+			return obj.PermanentFailureWindowMinutes, nil
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_AutoDisableChannel_permanentFailureWindowMinutes(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "AutoDisableChannel",
 		Field:      field,
@@ -55002,6 +55038,8 @@ func (ec *executionContext) fieldContext_RetryPolicy_autoDisableChannel(_ contex
 				return ec.fieldContext_AutoDisableChannel_rules(ctx, field)
 			case "permanentFailureThreshold":
 				return ec.fieldContext_AutoDisableChannel_permanentFailureThreshold(ctx, field)
+			case "permanentFailureWindowMinutes":
+				return ec.fieldContext_AutoDisableChannel_permanentFailureWindowMinutes(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type AutoDisableChannel", field.Name)
 		},
@@ -69313,7 +69351,7 @@ func (ec *executionContext) unmarshalInputAutoDisableChannelInput(ctx context.Co
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"enabled", "rules", "permanentFailureThreshold"}
+	fieldsInOrder := [...]string{"enabled", "rules", "permanentFailureThreshold", "permanentFailureWindowMinutes"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -69341,6 +69379,13 @@ func (ec *executionContext) unmarshalInputAutoDisableChannelInput(ctx context.Co
 				return it, err
 			}
 			it.PermanentFailureThreshold = data
+		case "permanentFailureWindowMinutes":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("permanentFailureWindowMinutes"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.PermanentFailureWindowMinutes = data
 		}
 	}
 
@@ -96962,6 +97007,11 @@ func (ec *executionContext) _AutoDisableChannel(ctx context.Context, sel ast.Sel
 			}
 		case "permanentFailureThreshold":
 			out.Values[i] = ec._AutoDisableChannel_permanentFailureThreshold(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "permanentFailureWindowMinutes":
+			out.Values[i] = ec._AutoDisableChannel_permanentFailureWindowMinutes(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

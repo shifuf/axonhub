@@ -51,12 +51,14 @@ func TestSystemService_PermanentFailureThresholdNormalization(t *testing.T) {
 	// 0 means "use the default".
 	policy := service.RetryPolicyOrDefault(ctx)
 	require.Equal(t, defaultPermanentModelFailureThreshold, policy.AutoDisableChannel.PermanentFailureThreshold)
+	require.Equal(t, defaultPermanentModelFailureWindowMinutes, policy.AutoDisableChannel.PermanentFailureWindowMinutes)
 
 	// A custom value round-trips.
 	require.NoError(t, service.SetRetryPolicy(ctx, &RetryPolicy{
-		AutoDisableChannel: AutoDisableChannel{PermanentFailureThreshold: 9},
+		AutoDisableChannel: AutoDisableChannel{PermanentFailureThreshold: 9, PermanentFailureWindowMinutes: 60},
 	}))
 	require.Equal(t, 9, service.RetryPolicyOrDefault(ctx).AutoDisableChannel.PermanentFailureThreshold)
+	require.Equal(t, 60, service.RetryPolicyOrDefault(ctx).AutoDisableChannel.PermanentFailureWindowMinutes)
 
 	// Out-of-range values are rejected on write.
 	require.Error(t, service.SetRetryPolicy(ctx, &RetryPolicy{
@@ -65,10 +67,16 @@ func TestSystemService_PermanentFailureThresholdNormalization(t *testing.T) {
 	require.Error(t, service.SetRetryPolicy(ctx, &RetryPolicy{
 		AutoDisableChannel: AutoDisableChannel{PermanentFailureThreshold: -1},
 	}))
+	require.Error(t, service.SetRetryPolicy(ctx, &RetryPolicy{
+		AutoDisableChannel: AutoDisableChannel{PermanentFailureWindowMinutes: maxPermanentModelFailureWindowMinutes + 1},
+	}))
 
 	// A legacy stored value above the cap is clamped on read, not rejected.
 	legacy := defaultRetryPolicy
 	legacy.AutoDisableChannel.PermanentFailureThreshold = maxPermanentModelFailureThreshold + 100
 	normalizeRetryPolicy(&legacy)
 	require.Equal(t, maxPermanentModelFailureThreshold, legacy.AutoDisableChannel.PermanentFailureThreshold)
+	legacy.AutoDisableChannel.PermanentFailureWindowMinutes = maxPermanentModelFailureWindowMinutes + 1
+	normalizeRetryPolicy(&legacy)
+	require.Equal(t, maxPermanentModelFailureWindowMinutes, legacy.AutoDisableChannel.PermanentFailureWindowMinutes)
 }

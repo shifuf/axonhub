@@ -31,11 +31,13 @@ const (
 	defaultAutoDisableWindowMinutes   = 10
 	defaultAutoDisableCooldownMinutes = 30
 	// defaultPermanentModelFailureThreshold is the fallback safeguard threshold:
-	// this many failures for one channel×model inside the shared rolling window
+	// this many failures for one channel×model inside the configured rolling window
 	// permanently freeze the model on that channel. Configurable through the
 	// retry policy (AutoDisableChannel.PermanentFailureThreshold).
-	defaultPermanentModelFailureThreshold = 6
-	maxPermanentModelFailureThreshold     = 1000
+	defaultPermanentModelFailureThreshold     = 6
+	maxPermanentModelFailureThreshold         = 1000
+	defaultPermanentModelFailureWindowMinutes = 24 * 60
+	maxPermanentModelFailureWindowMinutes     = 7 * 24 * 60
 )
 
 // The rolling failure window is persisted in the channel_failure_events table
@@ -218,17 +220,20 @@ func (svc *ChannelService) evaluateAutoDisableForFailure(ctx context.Context, pe
 		return false, false
 	}
 
-	// Channel-scope and global-scope rules share the same channel×model window,
-	// so the permanent-freeze safeguard threshold is resolved once per failure
-	// from the global retry policy.
+	// Channel-scope and global-scope rules contribute to the same channel×model
+	// permanent-freeze window, whose threshold and duration come from retry policy.
 	policy := svc.SystemService.RetryPolicyOrDefault(ctx)
 	threshold := policy.AutoDisableChannel.PermanentFailureThreshold
 	if threshold <= 0 {
 		threshold = defaultPermanentModelFailureThreshold
 	}
+	windowMinutes := policy.AutoDisableChannel.PermanentFailureWindowMinutes
+	if windowMinutes <= 0 {
+		windowMinutes = defaultPermanentModelFailureWindowMinutes
+	}
 
 	if mode == objects.APIKeyAutoDisableModeCustom {
-		matched, acted = svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel, threshold)
+		matched, acted = svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel, threshold, windowMinutes)
 		if matched {
 			return matched, acted
 		}
@@ -238,7 +243,7 @@ func (svc *ChannelService) evaluateAutoDisableForFailure(ctx context.Context, pe
 		return false, false
 	}
 
-	return svc.evaluateRules(ctx, perf, policy.AutoDisableChannel.Rules, autoDisableScopeGlobal, threshold)
+	return svc.evaluateRules(ctx, perf, policy.AutoDisableChannel.Rules, autoDisableScopeGlobal, threshold, windowMinutes)
 }
 
 // checkAndHandleChannelAPIKeyRules evaluates the channel's own rules only. Tests
@@ -249,16 +254,21 @@ func (svc *ChannelService) checkAndHandleChannelAPIKeyRules(ctx context.Context,
 		return false, false
 	}
 
-	threshold := svc.SystemService.RetryPolicyOrDefault(ctx).AutoDisableChannel.PermanentFailureThreshold
+	policy := svc.SystemService.RetryPolicyOrDefault(ctx).AutoDisableChannel
+	threshold := policy.PermanentFailureThreshold
 	if threshold <= 0 {
 		threshold = defaultPermanentModelFailureThreshold
 	}
-	return svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel, threshold)
+	windowMinutes := policy.PermanentFailureWindowMinutes
+	if windowMinutes <= 0 {
+		windowMinutes = defaultPermanentModelFailureWindowMinutes
+	}
+	return svc.evaluateRules(ctx, perf, ch.Policies.APIKeyAutoDisableRules, autoDisableScopeChannel, threshold, windowMinutes)
 }
 
 // evaluateRules counts the first matching rule once per failure. The action
 // target is always the original request model, regardless of legacy flags.
-func (svc *ChannelService) evaluateRules(ctx context.Context, perf *PerformanceRecord, rules []objects.APIKeyAutoDisableRule, scope autoDisableScope, permanentThreshold int) (matched, acted bool) {
+func (svc *ChannelService) evaluateRules(ctx context.Context, perf *PerformanceRecord, rules []objects.APIKeyAutoDisableRule, scope autoDisableScope, permanentThreshold, permanentWindowMinutes int) (matched, acted bool) {
 	for ruleIndex, storedRule := range rules {
 		if !matchesAPIKeyRule(storedRule, perf) {
 			continue
@@ -268,7 +278,7 @@ func (svc *ChannelService) evaluateRules(ctx context.Context, perf *PerformanceR
 		}
 		rule := effectiveModelFreezeRule(storedRule)
 		ruleKey := apiKeyRuleCounterKey(autoDisableRuleIdentity(perf, rule), scope, ruleIndex, rule)
-		return true, svc.evaluateWindowedRule(ctx, perf, rule, ruleKey, permanentThreshold)
+		return true, svc.evaluateWindowedRule(ctx, perf, rule, ruleKey, permanentThreshold, permanentWindowMinutes)
 	}
 	return false, false
 }
@@ -457,7 +467,7 @@ func (svc *ChannelService) executePermanentModelFailureGuardDetail(ctx context.C
 // persisted first (see channel_failure_window.go), so the rolling window counts
 // survive restarts and merge across server instances; only the action claim
 // stays in-process, and the persisted cooldown writes stay CAS-protected.
-func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *PerformanceRecord, rule objects.APIKeyAutoDisableRule, ruleKey string, permanentThreshold int) bool {
+func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *PerformanceRecord, rule objects.APIKeyAutoDisableRule, ruleKey string, permanentThreshold, permanentWindowMinutes int) bool {
 	rule = effectiveModelFreezeRule(rule)
 	window := time.Duration(rule.WindowMinutes) * time.Minute
 	now := time.Now()
@@ -481,7 +491,13 @@ func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *Perfo
 		return false
 	}
 
-	permanent := snapshot.windowTotal >= permanentThreshold
+	permanentCutoff := now.Add(-time.Duration(permanentWindowMinutes) * time.Minute)
+	permanentSnapshot, err := svc.countChannelModelFailureEvents(ctx, perf.ChannelID, perf.Model, permanentCutoff)
+	if err != nil {
+		log.Error(ctx, "failed to count permanent model failure window", log.Cause(err), log.Int("channel_id", perf.ChannelID))
+		return false
+	}
+	permanent := permanentSnapshot.windowTotal >= permanentThreshold
 	if !permanent && snapshot.ruleCount < max(rule.Times, 1) {
 		return false
 	}
@@ -500,7 +516,13 @@ func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *Perfo
 
 	var acted bool
 	if permanent {
-		acted = svc.executePermanentModelFailureGuardDetail(ctx, &latestFailure, rule.WindowMinutes, snapshot.windowTotal, permanentThreshold, failureDetail)
+		permanentFailure := latestFailure
+		permanentDetail := failureDetail
+		if permanentSnapshot.latest != nil {
+			permanentFailure = performanceRecordFromFailureEvent(permanentSnapshot.latest)
+			permanentDetail = permanentSnapshot.latest.ErrorDetail
+		}
+		acted = svc.executePermanentModelFailureGuardDetail(ctx, &permanentFailure, permanentWindowMinutes, permanentSnapshot.windowTotal, permanentThreshold, permanentDetail)
 	} else {
 		acted = svc.executeMatchedRuleAction(ctx, perf, rule, snapshot.ruleCount)
 	}
@@ -508,7 +530,7 @@ func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *Perfo
 	if !permanent {
 		// The safeguard threshold may have been crossed while the model freeze held the
 		// claim. Escalate before releasing it; do not require a seventh request.
-		recount, err := svc.countChannelFailureEvents(ctx, ruleKey, windowKey, time.Now().Add(-window))
+		recount, err := svc.countChannelModelFailureEvents(ctx, perf.ChannelID, perf.Model, time.Now().Add(-time.Duration(permanentWindowMinutes)*time.Minute))
 		if err != nil {
 			log.Error(ctx, "failed to recount channel failure window", log.Cause(err), log.Int("channel_id", perf.ChannelID))
 		} else if recount.windowTotal >= permanentThreshold {
@@ -518,7 +540,7 @@ func (svc *ChannelService) evaluateWindowedRule(ctx context.Context, perf *Perfo
 				escalatedFailure = performanceRecordFromFailureEvent(recount.latest)
 				escalatedDetail = recount.latest.ErrorDetail
 			}
-			escalated := svc.executePermanentModelFailureGuardDetail(ctx, &escalatedFailure, rule.WindowMinutes, recount.windowTotal, permanentThreshold, escalatedDetail)
+			escalated := svc.executePermanentModelFailureGuardDetail(ctx, &escalatedFailure, permanentWindowMinutes, recount.windowTotal, permanentThreshold, escalatedDetail)
 			acted = acted || escalated
 		}
 	}
