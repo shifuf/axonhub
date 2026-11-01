@@ -528,6 +528,13 @@ type TestChannelPayload struct {
 	Error   *string `json:"error,omitempty"`
 }
 
+type TestChannelQuotaPayload struct {
+	ProviderType string                 `json:"providerType"`
+	Status       string                 `json:"status"`
+	Ready        bool                   `json:"ready"`
+	QuotaData    objects.JSONRawMessage `json:"quotaData"`
+}
+
 type TokenStats struct {
 	TotalInputTokensToday      int        `json:"totalInputTokensToday"`
 	TotalOutputTokensToday     int        `json:"totalOutputTokensToday"`

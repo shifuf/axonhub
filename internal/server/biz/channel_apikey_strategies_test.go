@@ -189,6 +189,63 @@ func TestPriorityKeyProvider_AllDisabledFallsBackToFirst(t *testing.T) {
 	require.Equal(t, "first", p.Get(context.Background()))
 }
 
+func TestKeyProviders_RetryExclusionSelectsAnotherKey(t *testing.T) {
+	svc := &ChannelService{}
+	ctx := contexts.EnsureContainer(context.Background())
+	ctx = contexts.WithTraceID(ctx, "retry-key-rotation")
+	ctx = contexts.WithTrace(ctx, &ent.Trace{TraceID: "retry-key-rotation"})
+
+	tests := []struct {
+		name     string
+		strategy string
+		new      func(*Channel) interface{ Get(context.Context) string }
+	}{
+		{
+			name:     "sticky",
+			strategy: objects.APIKeyStrategySticky,
+			new: func(ch *Channel) interface{ Get(context.Context) string } {
+				return newSharedStickyKeyProvider(ch)
+			},
+		},
+		{
+			name:     "round robin",
+			strategy: objects.APIKeyStrategyRoundRobin,
+			new: func(ch *Channel) interface{ Get(context.Context) string } {
+				return NewRoundRobinKeyProvider(ch, 10)
+			},
+		},
+		{
+			name:     "priority",
+			strategy: objects.APIKeyStrategyPriority,
+			new: func(ch *Channel) interface{ Get(context.Context) string } {
+				return NewPriorityKeyProvider(ch)
+			},
+		},
+		{
+			name:     "fixed",
+			strategy: objects.APIKeyStrategyFixed,
+			new: func(ch *Channel) interface{ Get(context.Context) string } {
+				return NewFixedKeyProvider(ch)
+			},
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := withStrategy(newKeyChannel(i+1, []string{"k1", "k2", "k3"}), tt.strategy)
+			ch.apiKeyState = svc.apiKeySelectionStateFor(ch)
+			provider := tt.new(ch)
+
+			first := provider.Get(ctx)
+			contexts.ExcludeChannelAPIKeyForRetry(ctx, ch.ID, first)
+
+			second := provider.Get(ctx)
+			require.NotEqual(t, first, second)
+			require.Contains(t, []string{"k1", "k2", "k3"}, second)
+		})
+	}
+}
+
 // --- C. fixed ---
 
 func TestFixedKeyProvider_StartsAtFirstSelectable(t *testing.T) {

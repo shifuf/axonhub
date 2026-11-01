@@ -206,7 +206,7 @@
   "system.retry.autoDisableChannel.webhook.body": "Request Body Template",
   "system.retry.autoDisableChannel.webhook.templateHelp": "Available template variables: {{.Event}}, {{.OccurredAt}}, {{.Channel.ID}}, {{.Channel.Name}}, {{.Channel.Provider}}, {{.Channel.Status}}, {{.Trigger.StatusCode}}, {{.Trigger.Threshold}}, {{.Trigger.ActualCount}}, {{.Trigger.Reason}}.",
   "system.retry.clientCancellation.label": "Client Cancellation Cooldown",
-  "system.retry.clientCancellation.description": "Only client cancellations that meet the required upstream evidence gates count toward this separate model cooldown policy. They do not contribute to the actual-error counter or its permanent model-freeze safeguard.",
+  "system.retry.clientCancellation.description": "Client cancellations after upstream response headers or data count toward this separate model cooldown policy; a first token is not required. Cancellations without an upstream response are not counted. Local gateway heartbeats are not upstream-response evidence. Only the channel × original request model is cooled down; other models and API keys stay enabled. These cancellations do not contribute to the actual-error counter or its permanent model-freeze safeguard.",
   "system.retry.clientCancellation.globalTitle": "Global Settings",
   "system.retry.clientCancellation.threshold.label": "Cancellation threshold",
   "system.retry.clientCancellation.threshold.description": "Number of evidence-qualified cancellations required to trigger a model cooldown.",

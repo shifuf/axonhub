@@ -1,4 +1,5 @@
 {
+  "models.cooldown.frozenOnChannel": "model frozen on channel {{channel}}",
   "models.title": "Models",
   "models.description": "Configure AI model associations, capabilities, and fallback rules.",
   "models.columns.icon": "Icon",

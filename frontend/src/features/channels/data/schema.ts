@@ -425,6 +425,7 @@ export type KeyGroup = z.infer<typeof keyGroupSchema>;
 export const channelCredentialsSchema = z.object({
   apiKey: z.string().optional().nullable(),
   apiKeys: z.array(z.string()).optional().nullable(),
+  quotaApiKey: z.string().optional().nullable(),
   // Grouped keys: each entry is a named key with its own model allowlist. When
   // present they supersede apiKeys; the read schema must tolerate partial data
   // written by older clients.
@@ -562,6 +563,14 @@ export const testChannelAPIKeysPayloadSchema = z.object({
   results: z.array(testAPIKeyResultSchema),
 });
 export type TestChannelAPIKeysPayload = z.infer<typeof testChannelAPIKeysPayloadSchema>;
+
+export const testChannelQuotaPayloadSchema = z.object({
+  providerType: z.string(),
+  status: z.string(),
+  ready: z.boolean(),
+  quotaData: z.unknown(),
+});
+export type TestChannelQuotaPayload = z.infer<typeof testChannelQuotaPayloadSchema>;
 
 // Pricing Schemas
 export const pricingModeSchema = z.enum(['flat_fee', 'usage_per_unit', 'usage_tiered', 'usage_volume']);
@@ -897,6 +906,7 @@ export const createChannelInputSchema = z
       apiKey: z.string().optional(),
       // apiKeys remains only for backward-compatible OAuth/legacy writes
       apiKeys: z.array(z.string()).optional(),
+      quotaApiKey: z.string().optional(),
       // keyGroups is the only regular-key form: each entry has a required remark,
       // its own model allowlist. When present it supersedes apiKeys.
       keyGroups: z.array(keyGroupInputShapeSchema).optional().default([]),
@@ -1022,6 +1032,7 @@ export const updateChannelInputSchema = z
         apiKey: z.string().optional(),
         // apiKeys 用于普通 API Key（支持多 key 负载均衡），OAuth 类型不使用此字段
         apiKeys: z.array(z.string()).optional(),
+        quotaApiKey: z.string().optional(),
         // keyGroups is the grouped form of apiKeys: name + key + model allowlist per row.
         keyGroups: z.array(keyGroupInputShapeSchema).optional(),
         // Vertex credentials are project-bound triples; an omitted region defaults to global.

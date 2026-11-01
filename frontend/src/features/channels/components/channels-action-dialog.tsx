@@ -39,6 +39,7 @@ import {
   useAllChannelNames,
   useAllChannelTags,
   useSyncChannelModels,
+  useTestChannelQuota,
 } from '../data/channels';
 import { claudecodeOAuthExchange, claudecodeOAuthStart } from '../data/claudecode';
 import { codexDecodeAuthJSON, codexOAuthExchange, codexOAuthStart } from '../data/codex';
@@ -691,6 +692,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const isDuplicate = !!duplicateFromRow && !isEdit;
   const initialRow: Channel | undefined = currentRow || duplicateFromRow;
   const createChannel = useCreateChannel();
+  const testChannelQuota = useTestChannelQuota();
   const duplicateChannel = useDuplicateChannel();
   const updateChannelSettings = useUpdateChannelSettings();
   const fetchModels = useFetchModels();
@@ -1057,6 +1059,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
               // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
               apiKey: currentRow.credentials?.apiKey ?? undefined,
               apiKeys: [],
+              quotaApiKey: currentRow.credentials?.quotaApiKey ?? undefined,
               keyGroups: normalizeKeyGroupsFromCredentials(currentRow.credentials, currentRow.supportedModels),
               vertexApiKeys: currentRow.type === 'gemini_vertex' ? (currentRow.credentials?.vertexApiKeys ?? undefined) : [],
               managementApiKey: currentRow.credentials?.managementApiKey || undefined,
@@ -1085,6 +1088,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                 // OAuth 类型的凭据存储在 apiKey 字段，不放入 apiKeys
                 apiKey: duplicateFromRow.credentials?.apiKey ?? undefined,
                 apiKeys: [],
+                quotaApiKey: duplicateFromRow.credentials?.quotaApiKey ?? undefined,
                 keyGroups: normalizeKeyGroupsFromCredentials(duplicateFromRow.credentials, duplicateFromRow.supportedModels),
                 vertexApiKeys: duplicateFromRow.type === 'gemini_vertex' ? (duplicateFromRow.credentials?.vertexApiKeys ?? undefined) : [],
                 managementApiKey: duplicateFromRow.credentials?.managementApiKey || undefined,
@@ -1102,6 +1106,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
               policies: { stream: 'unlimited' },
               credentials: {
                 apiKeys: [],
+                quotaApiKey: undefined,
                 keyGroups: [createEmptyKeyGroup(1)],
                 vertexApiKeys: isVertexChannelType(derivedChannelType) ? [emptyVertexAPIKey()] : [],
                 managementApiKey: undefined,
@@ -1178,6 +1183,18 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const isCopilotType = activeChannelType === 'github_copilot';
   const isXAISubscriptionType = activeChannelType === 'xai_subscription';
   const isZenmuxType = ['zenmux', 'zenmux_responses', 'zenmux_anthropic', 'zenmux_gemini', 'zenmux_video'].includes(activeChannelType);
+  const supportsQuotaAPIKey = ['nanogpt', 'nanogpt_responses', 'cline', 'minimax', 'minimax_anthropic', 'zhipu', 'zhipu_anthropic', 'zai', 'zai_anthropic', 'opencode_go', 'opencode_go_anthropic', 'moonshot_coding'].includes(activeChannelType) || (
+    ['openai', 'openai_responses'].includes(activeChannelType) &&
+    /(?:^|\.)(?:api\.(?:synthetic\.new|neuralwatt\.com|apertis\.ai)|hyper\.charm\.land)$/i.test(
+      (() => {
+        try {
+          return new URL(form.watch('baseURL') || '').hostname;
+        } catch {
+          return '';
+        }
+      })(),
+    )
+  );
   const isCommandCodeType = activeChannelType === 'commandcode' || activeChannelType === 'commandcode_anthropic';
   const isOllamaType = activeChannelType === 'ollama' || activeChannelType === 'ollama_anthropic';
 
@@ -1710,7 +1727,10 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         supportedModels: resolvedSupportedModels,
         manualModels,
         credentials: credentials
-          ? getCodexThirdPartySubmitCredentials(credentials, {
+          ? getCodexThirdPartySubmitCredentials({
+              ...credentials,
+              quotaApiKey: supportsQuotaAPIKey ? credentials.quotaApiKey?.trim() || undefined : undefined,
+            }, {
               type: valuesForSubmit.type,
               authMode,
             })
@@ -1811,6 +1831,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         const hasApiKey = apiKey.trim().length > 0;
         const hasApiKeys = false;
         const hasManagementApiKey = (values.credentials?.managementApiKey || '').trim().length > 0;
+        const hasQuotaApiKey = (values.credentials?.quotaApiKey || '').trim().length > 0;
         const hasGcpCredentials =
           values.credentials?.gcp?.region &&
           values.credentials.gcp.region.trim() !== '' &&
@@ -1824,7 +1845,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           values.credentials?.keyGroups &&
           values.credentials.keyGroups.some((group) => (group.apiKeys || []).some((key) => (key || '').trim() !== ''));
 
-        if (!hasApiKey && !hasApiKeys && !hasKeyGroups && !hasManagementApiKey && !hasGcpCredentials && !hasVertexApiKeys) {
+        if (!hasApiKey && !hasApiKeys && !hasKeyGroups && !hasManagementApiKey && !hasQuotaApiKey && !hasGcpCredentials && !hasVertexApiKeys) {
           delete updateInput.credentials;
         }
 
@@ -3074,6 +3095,52 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                   value={field.value ?? ''}
                                 />
                                 <p className='text-muted-foreground text-xs'>{t('channels.dialogs.fields.managementApiKey.hint')}</p>
+                              </div>
+                            </FormItem>
+                          )}
+                        />
+                      )}
+
+                      {supportsQuotaAPIKey && (
+                        <FormField
+                          control={form.control}
+                          name='credentials.quotaApiKey'
+                          render={({ field }) => (
+                            <FormItem className='grid grid-cols-1 items-start gap-x-6 gap-y-2 md:grid-cols-8'>
+                              <FormLabel className='pt-2 font-medium md:col-span-2 md:text-right'>
+                                {t('channels.dialogs.fields.quotaApiKey.label')}
+                              </FormLabel>
+                              <div className='space-y-2 md:col-span-6'>
+                                <Input
+                                  type='password'
+                                  placeholder={t('channels.dialogs.fields.quotaApiKey.placeholder')}
+                                  autoComplete='new-password'
+                                  data-form-type='other'
+                                  spellCheck={false}
+                                  {...field}
+                                  value={field.value ?? ''}
+                                />
+                                <p className='text-muted-foreground text-xs'>{t('channels.dialogs.fields.quotaApiKey.hint')}</p>
+                                <Button
+                                  type='button'
+                                  size='sm'
+                                  variant='outline'
+                                  disabled={testChannelQuota.isPending || !form.watch('credentials.quotaApiKey')?.trim()}
+                                  onClick={async () => {
+                                    try {
+                                      const result = await testChannelQuota.mutateAsync({
+                                        channelType: activeChannelType,
+                                        baseURL: form.getValues('baseURL'),
+                                        quotaApiKey: form.getValues('credentials.quotaApiKey') || '',
+                                      });
+                                      toast.success(t('channels.dialogs.fields.quotaApiKey.testSuccess', { status: result.status }));
+                                    } catch {
+                                      // The shared mutation error handler displays the request failure.
+                                    }
+                                  }}
+                                >
+                                  {testChannelQuota.isPending ? t('common.buttons.processing') : t('channels.dialogs.fields.quotaApiKey.test')}
+                                </Button>
                               </div>
                             </FormItem>
                           )}

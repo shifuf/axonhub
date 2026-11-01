@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/looplj/axonhub/internal/ent"
@@ -573,6 +574,12 @@ func (svc *ChannelService) RecordPerformance(ctx context.Context, perf *Performa
 
 // AsyncRecordPerformance records performance metrics to in-memory cache asynchronously.
 func (svc *ChannelService) AsyncRecordPerformance(ctx context.Context, perr *PerformanceRecord) {
+	// Raw-error handling and deferred stream accounting can submit the same
+	// completed attempt. Its evidence must contribute at most one sample.
+	if perr == nil || !atomic.CompareAndSwapUint32(&perr.asyncRecorded, 0, 1) {
+		return
+	}
+
 	svc.perfCh <- perr
 }
 
@@ -687,6 +694,12 @@ type PerformanceRecord struct {
 	Success            bool
 	Canceled           bool
 	RequestCompleted   bool
+
+	// UpstreamResponseReceived is per-attempt, in-memory response-header/data evidence.
+	UpstreamResponseReceived bool `json:"-"`
+
+	// asyncRecorded is an in-memory, atomically guarded per-attempt submission flag.
+	asyncRecorded uint32
 
 	// If response status code is 0, it means the request is successful.
 	ResponseStatusCode int

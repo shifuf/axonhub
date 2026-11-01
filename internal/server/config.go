@@ -94,6 +94,7 @@ type Config struct {
 	RequestTimeout time.Duration `conf:"request_timeout" yaml:"request_timeout" json:"request_timeout"`
 
 	// LLMRequestTimeout is the maximum duration for processing a request to LLM.
+	// Zero disables this deadline while preserving caller cancellation.
 	LLMRequestTimeout time.Duration `conf:"llm_request_timeout" yaml:"llm_request_timeout" json:"llm_request_timeout"`
 
 	Safeguards safeguards.Config `conf:"safeguards" yaml:"safeguards" json:"safeguards"`

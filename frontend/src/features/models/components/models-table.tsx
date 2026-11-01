@@ -28,6 +28,7 @@ import { PermissionGuard } from '@/components/permission-guard';
 import { useModelSettings } from '@/features/system/data/system';
 import { useModels } from '../context/models-context';
 import { Model } from '../data/schema';
+import { getVisibleFrozenModelIDs } from '../data/frozen-model-channels';
 import { ModelFrozenChannelsSection } from './model-frozen-channels-section';
 
 const MotionTableRow = motion.create(TableRow);
@@ -52,6 +53,7 @@ interface ModelsTableProps {
   sorting: SortingState;
   onSortingChange: (updater: SortingState | ((prev: SortingState) => SortingState)) => void;
   onNameFilterChange: (filter: string) => void;
+  onVisibleModelIDsChange?: (ids: string[]) => void;
   canWrite?: boolean;
 }
 
@@ -64,6 +66,7 @@ export function ModelsTable({
   sorting,
   onSortingChange,
   onNameFilterChange,
+  onVisibleModelIDsChange,
   canWrite = true,
 }: ModelsTableProps) {
   const { t } = useTranslation();
@@ -133,6 +136,10 @@ export function ModelsTable({
     });
     return new Map([...groups.entries()].sort(([a], [b]) => a.localeCompare(b)));
   }, [table, data, sorting]);
+
+  useEffect(() => {
+    onVisibleModelIDsChange?.(getVisibleFrozenModelIDs(groupedRows, collapsedGroups));
+  }, [groupedRows, collapsedGroups, onVisibleModelIDsChange]);
 
   const allGroupsCollapsed = groupedRows.size > 0 && collapsedGroups.size === groupedRows.size;
   const developerRuleCounts = useMemo(() => {

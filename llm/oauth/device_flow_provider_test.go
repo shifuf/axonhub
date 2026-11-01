@@ -669,6 +669,40 @@ func TestDeviceFlowProvider_GetToken_Refresh(t *testing.T) {
 	assert.Equal(t, "new-refresh-token", stored.RefreshToken)
 }
 
+func TestDeviceFlowProvider_ForceRefreshUnexpiredCredentials(t *testing.T) {
+	var calls atomic.Int32
+	var refreshed atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		require.NoError(t, writeTokenResponse(w, "forced-device-access", "forced-device-refresh", 3600))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := NewDeviceFlowProvider(DeviceFlowProviderParams{
+		HTTPClient: httpclient.NewHttpClientWithClient(server.Client()),
+		Config: DeviceFlowConfig{
+			TokenURL: server.URL + "/token",
+			ClientID: "device-client",
+		},
+		Credentials: &OAuthCredentials{
+			AccessToken:  "still-valid-device-access",
+			RefreshToken: "device-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+		OnRefreshed: func(ctx context.Context, credentials *OAuthCredentials) error {
+			refreshed.Add(1)
+			return nil
+		},
+	})
+
+	got, err := provider.ForceRefresh(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "forced-device-access", got.AccessToken)
+	require.Equal(t, int32(1), calls.Load())
+	require.Equal(t, int32(1), refreshed.Load())
+}
+
 // Test GetToken() refresh without refresh_token.
 func TestDeviceFlowProvider_GetToken_Refresh_NoRefreshToken(t *testing.T) {
 	t.Parallel()

@@ -101,6 +101,10 @@ func (m *performanceRecording) OnOutboundRawRequest(ctx context.Context, request
 }
 
 func (m *performanceRecording) OnOutboundRawResponse(ctx context.Context, response *httpclient.Response) (*httpclient.Response, error) {
+	if m.outbound.state.Perf != nil {
+		m.outbound.state.Perf.UpstreamResponseReceived = true
+	}
+
 	return response, nil
 }
 
@@ -122,6 +126,12 @@ func (m *performanceRecording) OnOutboundLlmResponse(ctx context.Context, respon
 }
 
 func (m *performanceRecording) OnOutboundRawStream(ctx context.Context, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*httpclient.StreamEvent], error) {
+	// This hook runs after DoStream succeeds, so response headers have arrived
+	// even if cancellation prevents the first event or token from being read.
+	if m.outbound.state.Perf != nil {
+		m.outbound.state.Perf.UpstreamResponseReceived = true
+	}
+
 	return stream, nil
 }
 
@@ -142,7 +152,14 @@ func (m *performanceRecording) OnOutboundRawError(ctx context.Context, err error
 	}
 
 	perf := m.outbound.state.Perf
-	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+	// Pre-read closes and finalizes failed streams before notifying raw-error
+	// middleware. Preserve that outcome and submit each attempt only once.
+	if perf.RequestCompleted {
+		return
+	}
+
+	deadlineExceeded := errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)
+	if !deadlineExceeded && (errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled)) {
 		perf.MarkCanceled()
 	} else {
 		errorCode := ExtractErrorCode(err)

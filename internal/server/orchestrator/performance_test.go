@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -443,4 +444,89 @@ func (s *responseSliceStream) Err() error {
 
 func (s *responseSliceStream) Close() error {
 	return nil
+}
+
+func TestPerformanceRecording_RawErrorDeadlineTakesPrecedenceOverCancellation(t *testing.T) {
+	env := newCancellationTestEnv(t, &mockExecutor{}, []string{"key-1"})
+	canceledCtx, cancel := context.WithCancel(env.ctx)
+	cancel()
+	deadlineCtx, cancelDeadline := context.WithDeadline(env.ctx, time.Now().Add(-time.Second))
+	defer cancelDeadline()
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+	}{
+		{name: "deadline-error", ctx: env.ctx, err: fmt.Errorf("upstream: %w", context.DeadlineExceeded)},
+		{name: "deadline-context-with-cancel-error", ctx: deadlineCtx, err: context.Canceled},
+		{name: "deadline-error-with-cancel-context", ctx: canceledCtx, err: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			perf := &biz.PerformanceRecord{ChannelID: env.channelIDs[0], Model: "gpt-4", Stream: true}
+			middleware := &performanceRecording{outbound: &PersistentOutboundTransformer{state: &PersistenceState{
+				Perf: perf, ChannelService: env.channelService,
+			}}}
+			middleware.OnOutboundRawError(tc.ctx, tc.err)
+			require.True(t, perf.RequestCompleted)
+			require.False(t, perf.Success)
+			require.False(t, perf.Canceled, "gateway deadlines must never count as client cancellations")
+		})
+	}
+}
+
+func TestPerformanceRecording_RawResponseEvidenceBeforeAnyToken(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", streaming), func(t *testing.T) {
+			state := &PersistenceState{Perf: &biz.PerformanceRecord{Stream: streaming}}
+			middleware := &performanceRecording{outbound: &PersistentOutboundTransformer{state: state}}
+			ctx := context.Background()
+			if streaming {
+				raw := &errorAfterEventsStream{err: context.Canceled}
+				result, err := middleware.OnOutboundRawStream(ctx, raw)
+				require.NoError(t, err)
+				require.Same(t, raw, result, "evidence collection must not read or wrap the stream")
+			} else {
+				raw := &httpclient.Response{StatusCode: 200}
+				result, err := middleware.OnOutboundRawResponse(ctx, raw)
+				require.NoError(t, err)
+				require.Same(t, raw, result)
+			}
+			require.True(t, state.Perf.UpstreamResponseReceived)
+			require.Nil(t, state.Perf.FirstTokenTime, "response evidence must not fabricate TTFT")
+			require.False(t, state.Perf.RequestCompleted)
+
+			// Retry attempts must not inherit the preceding response evidence.
+			state.CurrentCandidate = &ChannelModelsCandidate{Channel: &biz.Channel{Channel: &ent.Channel{ID: 1}}}
+			_, err := middleware.OnOutboundRawRequest(ctx, &httpclient.Request{})
+			require.NoError(t, err)
+			require.False(t, state.Perf.UpstreamResponseReceived)
+			require.Equal(t, streaming, state.Perf.Stream)
+		})
+	}
+}
+
+func TestPerformanceRecording_RawErrorPreservesFinalizedOutcome(t *testing.T) {
+	env := newCancellationTestEnv(t, &mockExecutor{}, []string{"key-1"})
+	for _, outcome := range []string{"canceled", "success", "deadline"} {
+		t.Run(outcome, func(t *testing.T) {
+			perf := &biz.PerformanceRecord{ChannelID: env.channelIDs[0], Model: "gpt-4", Stream: true, UpstreamResponseReceived: true}
+			switch outcome {
+			case "canceled":
+				perf.MarkCanceled()
+			case "success":
+				perf.MarkSuccess()
+			case "deadline":
+				perf.MarkFailedWithMessage(500, context.DeadlineExceeded.Error())
+			}
+			before := *perf
+			middleware := &performanceRecording{outbound: &PersistentOutboundTransformer{state: &PersistenceState{
+				Perf: perf, ChannelService: env.channelService,
+			}}}
+			// Pre-read closes/finalizes the stream before notifying raw-error
+			// middleware. That notification must not mutate or resubmit it.
+			middleware.OnOutboundRawError(env.ctx, context.Canceled)
+			require.Equal(t, before, *perf)
+		})
+	}
 }

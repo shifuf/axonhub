@@ -44,6 +44,7 @@ func TestRetryTransportClassification(t *testing.T) {
 		{"unexpected EOF", io.ErrUnexpectedEOF, true},
 		{"LLM incomplete stream", llm.ErrStreamIncomplete, true},
 		{"orchestrator incomplete stream", ErrStreamIncomplete, true},
+		{"stream idle timeout", fmt.Errorf("read upstream: %w", httpclient.ErrStreamIdleTimeout), true},
 		{"network timeout", &net.DNSError{IsTimeout: true}, true},
 		{"temporary network error", &net.DNSError{IsTemporary: true}, true},
 		{"wrapped cancellation", fmt.Errorf("read: %w", context.Canceled), false},

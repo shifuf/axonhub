@@ -1,4 +1,10 @@
 {
+  "channels.cooldown.modelFrozen": "{{model}} model frozen",
+  "channels.dialogs.fields.quotaApiKey.label": "Quota Query API Key",
+  "channels.dialogs.fields.quotaApiKey.placeholder": "Enter an API key used only for quota checks",
+  "channels.dialogs.fields.quotaApiKey.hint": "Optional. Used only to check quota, never for model inference. Automatic quota checks are skipped when empty.",
+  "channels.dialogs.fields.quotaApiKey.test": "Test quota lookup",
+  "channels.dialogs.fields.quotaApiKey.testSuccess": "Quota check succeeded ({{status}})",
   "copilot_device.copy_code": "Copy code",
   "copilot_device.step_1": "Click the button above to open GitHub",
   "copilot_device.step_2": "Enter the code shown above",

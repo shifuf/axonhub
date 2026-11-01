@@ -18,9 +18,9 @@ func (svc *ChannelService) evaluateClientCancellationForFailure(ctx context.Cont
 		return false
 	}
 
-	// A non-stream abort or a stream that never received a first token says
-	// nothing about the upstream channel. Preserve that eligibility boundary.
-	if !perf.Stream || perf.FirstTokenTime == nil {
+	// Only streaming cancellations with upstream response evidence count.
+	// Keep first-token evidence for producers that do not record response headers.
+	if !perf.Stream || (!perf.UpstreamResponseReceived && perf.FirstTokenTime == nil) {
 		return false
 	}
 

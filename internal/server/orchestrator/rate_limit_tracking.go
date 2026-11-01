@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/looplj/axonhub/internal/log"
@@ -87,21 +88,25 @@ func (m *rateLimitTracking) OnOutboundRawError(ctx context.Context, err error) {
 		return
 	}
 
-	// Only cool down a channel when the upstream explicitly provides a cooldown.
-	if !httpclient.HasRetryAfterHeader(err) {
+	// Only retryable upstream failures trigger cooldown. Local admission
+	// rejections and client cancellation were already excluded above.
+	if !isRetryableErrorForChannel(err, channel) {
 		return
 	}
 
-	// Parse Retry-After header from 429 error
-	cooldown, ok := httpclient.ParseRetryAfter(err)
-	if !ok {
-		return
+	cooldown := time.Duration(httpclient.DefaultRetryAfterSeconds) * time.Second
+	var httpErr *httpclient.Error
+	if errors.As(err, &httpErr) {
+		if retryAfter, ok := httpclient.ParseRetryAfterHeader(httpErr.Headers); ok {
+			cooldown = max(cooldown, retryAfter)
+		}
 	}
+	cooldown = min(cooldown, httpclient.MaxRetryAfterDuration)
 
 	// Set cooldown for this channel
 	m.tracker.SetCooldown(channel.ID, time.Now().Add(cooldown))
 
-	log.Warn(ctx, "channel cooling down due to 429",
+	log.Warn(ctx, "channel cooling down due to retryable upstream failure",
 		log.Int("channel_id", channel.ID),
 		log.String("channel_name", channel.Name),
 		log.Duration("cooldown", cooldown),

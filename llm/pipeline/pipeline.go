@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"time"
 
 	"github.com/looplj/axonhub/llm"
@@ -35,6 +36,26 @@ type ChannelRetryable interface {
 	// PrepareForRetry prepares the transformer for retry.
 	// It will be called if CanRetry returns true.
 	PrepareForRetry(ctx context.Context) error
+}
+
+// RetrySafety is an optional interface for transformers that generate
+// billable or non-idempotent artifacts. When it returns false, the pipeline
+// must not replay the request on either the same channel or another channel.
+type RetrySafety interface {
+	RetrySafe() bool
+}
+
+// UnauthorizedRefresher is an optional interface for providers whose
+// credential can be refreshed after an upstream 401.
+type UnauthorizedRefresher interface {
+	RefreshAuth(ctx context.Context) (bool, error)
+}
+
+// FailoverEligible is an optional interface that separates "may switch to
+// another channel" from "may retry the current channel". For example, 429 must
+// switch channels but must not hammer the same rate-limited channel.
+type FailoverEligible interface {
+	CanFailover(err error) bool
 }
 
 // ChannelSameChannelRetryLimit is an optional interface a ChannelRetryable may
@@ -297,6 +318,7 @@ func (p *pipeline) Process(ctx context.Context, request *httpclient.Request) (*R
 
 	channelSwitches := 0
 	sameChannelRetries := 0
+	authRefreshAttempted := false
 
 	// Step 3: Process the request
 	for {
@@ -323,12 +345,36 @@ func (p *pipeline) Process(ctx context.Context, request *httpclient.Request) (*R
 			return nil, lastErr
 		}
 
+		// A failed billable write may already have been accepted upstream. Retry
+		// safety is checked before both strategies so neither another key nor
+		// another channel can duplicate the operation.
+		if retrySafety, ok := p.Outbound.(RetrySafety); ok && !retrySafety.RetrySafe() {
+			slog.DebugContext(ctx, "request is not safe to replay after failure")
+			break
+		}
+
 		// Determine retry strategy
 		canRetry := false
 		timeoutRetry := isResponseTimeoutError(lastErr)
 
+		// A 401 can be transient for OAuth-backed channels when the upstream
+		// invalidates an otherwise unexpired access token. Refresh at most once
+		// per logical request and replay the same channel immediately.
+		if !authRefreshAttempted && statusCodeFromError(lastErr) == http.StatusUnauthorized {
+			authRefreshAttempted = true
+			if refresher, ok := p.Outbound.(UnauthorizedRefresher); ok {
+				refreshed, err := refresher.RefreshAuth(ctx)
+				if err != nil {
+					slog.WarnContext(ctx, "failed to refresh upstream credential after 401", slog.Any("error", err))
+				} else if refreshed {
+					canRetry = true
+					slog.DebugContext(ctx, "refreshed upstream credential after 401, replaying")
+				}
+			}
+		}
+
 		// 1. Try same-channel retry first if supported
-		if !timeoutRetry {
+		if !canRetry && !timeoutRetry {
 			if channelRetryable, ok := p.Outbound.(ChannelRetryable); ok {
 				if sameChannelRetries < p.maxSameChannelRetriesFor() && channelRetryable.CanRetry(lastErr) {
 					if err := channelRetryable.PrepareForRetry(ctx); err == nil {
@@ -350,7 +396,12 @@ func (p *pipeline) Process(ctx context.Context, request *httpclient.Request) (*R
 		// A canceled request has no client left to receive the response, so
 		// switching channels would only burn upstream quota and charge an innocent
 		// channel with a failure it did not cause.
-		if !canRetry && !errors.Is(lastErr, context.Canceled) && !errors.Is(ctx.Err(), context.Canceled) {
+		failoverEligible := true
+		if policy, ok := p.Outbound.(FailoverEligible); ok {
+			failoverEligible = policy.CanFailover(lastErr)
+		}
+
+		if !canRetry && failoverEligible && !errors.Is(lastErr, context.Canceled) && !errors.Is(ctx.Err(), context.Canceled) {
 			if retryable, ok := p.Outbound.(Retryable); ok {
 				if channelSwitches < p.maxChannelRetries && retryable.HasMoreChannels() {
 					if err := retryable.NextChannel(ctx); err == nil {
@@ -512,6 +563,24 @@ func (p *pipeline) maxSameChannelRetriesFor() int {
 
 func isResponseTimeoutError(err error) bool {
 	return errors.Is(err, ErrStreamFirstEventTimeout) || errors.Is(err, ErrNonStreamResponseTimeout)
+}
+
+func statusCodeFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+
+	var httpErr *httpclient.Error
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode
+	}
+
+	var responseErr *llm.ResponseError
+	if errors.As(err, &responseErr) {
+		return responseErr.StatusCode
+	}
+
+	return 0
 }
 
 func (p *pipeline) withNonStreamTimeout(ctx context.Context) (context.Context, context.CancelFunc) {

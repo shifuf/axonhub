@@ -40,6 +40,8 @@ import {
   testChannelAPIKeysPayloadSchema,
   TestAPIKeyResult,
   testAPIKeyResultSchema,
+  TestChannelQuotaPayload,
+  testChannelQuotaPayloadSchema,
   DetectedChannelEndpoint,
   detectedChannelEndpointSchema,
 } from './schema';
@@ -561,6 +563,17 @@ const TEST_CHANNEL_MUTATION = `
       success
       error
       message
+    }
+  }
+`;
+
+const TEST_CHANNEL_QUOTA_MUTATION = `
+  mutation TestChannelQuota($channelType: String!, $baseURL: String!, $quotaApiKey: String!) {
+    testChannelQuota(channelType: $channelType, baseURL: $baseURL, quotaApiKey: $quotaApiKey) {
+      providerType
+      status
+      ready
+      quotaData
     }
   }
 `;
@@ -1128,6 +1141,7 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
           credentials {
             apiKey
             apiKeys
+            quotaApiKey
             keyGroups {
               name
               apiKeys
@@ -1722,6 +1736,7 @@ export function useUpdateChannel() {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       queryClient.invalidateQueries({ queryKey: ['channel', data.id] });
       toast.success(t('channels.messages.updateSuccess'));
     },
@@ -1897,6 +1912,7 @@ export function useUpdateChannelStatus() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       const statusText =
         variables.status === 'enabled'
           ? t('channels.status.enabled')
@@ -1928,6 +1944,7 @@ export function useBulkArchiveChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkArchiveSuccess', { count: variables.length }));
     },
   });
@@ -1950,6 +1967,7 @@ export function useBulkDisableChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkDisableSuccess', { count: variables.length }));
     },
   });
@@ -1972,6 +1990,7 @@ export function useBulkEnableChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkEnableSuccess', { count: variables.length }));
     },
   });
@@ -1994,6 +2013,7 @@ export function useBulkRecoverChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       queryClient.invalidateQueries({ queryKey: ['errorChannelsCount'] });
       toast.success(t('channels.messages.bulkRecoverSuccess', { count: variables.length }));
     },
@@ -2017,6 +2037,7 @@ export function useDeleteChannel() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.deleteSuccess'));
     },
   });
@@ -2039,6 +2060,7 @@ export function useBulkDeleteChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkDeleteSuccess', { count: variables.length }));
     },
   });
@@ -2065,6 +2087,7 @@ export function useBulkManageChannelTags() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       queryClient.invalidateQueries({ queryKey: ['allChannelSummarys'] });
       queryClient.invalidateQueries({ queryKey: ['allChannelTags'] });
       queryClient.invalidateQueries({ queryKey: ['selectedChannelTags'] });
@@ -2072,6 +2095,22 @@ export function useBulkManageChannelTags() {
     },
     onError: () => {
       queryClient.invalidateQueries({ queryKey: ['selectedChannelTags'] });
+    },
+  });
+}
+
+export function useTestChannelQuota() {
+  const { handleError } = useErrorHandler();
+
+  return useMutation({
+    mutationFn: async (input: { channelType: string; baseURL: string; quotaApiKey: string }): Promise<TestChannelQuotaPayload> => {
+      try {
+        const data = await graphqlRequest<{ testChannelQuota: TestChannelQuotaPayload }>(TEST_CHANNEL_QUOTA_MUTATION, input);
+        return testChannelQuotaPayloadSchema.parse(data.testChannelQuota);
+      } catch (error) {
+        handleError(error, { context: 'Test Channel Quota' });
+        throw error;
+      }
     },
   });
 }

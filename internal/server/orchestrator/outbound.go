@@ -991,6 +991,10 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 		return err
 	}
 
+	// Key exclusions belong to the previous channel attempt. A new channel has
+	// its own credential namespace and must make a normal first selection.
+	contexts.ClearChannelAPIKeyRetryExclusions(ctx)
+
 	if lifecycleOwner := streamLifecycleFromContext(ctx); lifecycleOwner != nil {
 		lifecycleOwner.waitForAccounting()
 	}
@@ -1095,6 +1099,47 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 	return isRetryableErrorForChannel(err, p.state.CurrentCandidate.Channel)
 }
 
+// CanFailover reports whether another channel may resolve the failure. It is
+// intentionally broader than same-channel retry: 429 and local admission
+// rejections should move directly to another candidate without replaying the
+// current one.
+func (p *PersistentOutboundTransformer) CanFailover(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isChannelQueueError(err) || isLocalRPMExhaustedError(err) {
+		return true
+	}
+	if errors.Is(err, errSkipCandidateByCircuitBreaker) {
+		return true
+	}
+	if errors.Is(err, pipeline.ErrEmptyResponse) ||
+		errors.Is(err, pipeline.ErrEmptyStreamChunks) ||
+		errors.Is(err, pipeline.ErrEmptyAggregatedBody) ||
+		errors.Is(err, pipeline.ErrStreamFirstEventTimeout) ||
+		errors.Is(err, pipeline.ErrNonStreamResponseTimeout) {
+		return true
+	}
+	if ExtractStatusCodeFromError(err) == http.StatusUnauthorized {
+		return true
+	}
+	if p.state == nil || p.state.CurrentCandidate == nil {
+		return isRetryableError(err)
+	}
+
+	return isRetryableErrorForChannel(err, p.state.CurrentCandidate.Channel)
+}
+
+// RefreshAuth implements pipeline.UnauthorizedRefresher.
+func (p *PersistentOutboundTransformer) RefreshAuth(ctx context.Context) (bool, error) {
+	channel := p.GetCurrentChannel()
+	if channel == nil {
+		return false, nil
+	}
+
+	return channel.RefreshAuth(ctx)
+}
+
 // PrepareForRetry implements the pipeline.ChannelRetryable interface.
 // This will reset the request execution for the same channel, so that the same request can be retried.
 // It will try the next model in the same channel if available.
@@ -1126,6 +1171,10 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 
 	// If there's another model in the list, advance to it.
 	if p.state.CurrentModelIndex+1 < len(candidate.Models) {
+		// The key failure belongs to the previous model attempt; do not carry it
+		// into a different model that may route through another key group.
+		contexts.ClearChannelAPIKeyRetryExclusions(ctx)
+
 		// Increase the model index to the next model.
 		p.state.CurrentModelIndex++
 		p.refreshCandidateAPIFormat(ctx, candidate, p.state.CurrentModelIndex, p.state.LlmRequest)
@@ -1144,6 +1193,10 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 		}
 
 		return nil
+	}
+
+	if err := p.excludeCurrentRetryAPIKey(ctx); err != nil {
+		return err
 	}
 
 	p.trackCurrentChannelSelection()

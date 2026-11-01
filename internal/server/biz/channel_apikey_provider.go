@@ -56,6 +56,18 @@ func NewTraceStickyKeyProvider(channel *Channel) *TraceStickyKeyProvider {
 
 func (p *TraceStickyKeyProvider) Get(ctx context.Context) string {
 	enabled := p.channel.enabledAPIKeysForRequest(ctx)
+	excluded := contexts.GetChannelAPIKeyRetryExclusions(ctx, p.channel.ID)
+	if len(excluded) > 0 {
+		eligible := make([]string, 0, len(enabled))
+		for _, key := range enabled {
+			if _, skip := excluded[key]; !skip {
+				eligible = append(eligible, key)
+			}
+		}
+		if len(eligible) > 0 {
+			enabled = eligible
+		}
+	}
 	if len(enabled) == 0 {
 		// Nothing enabled is left for this request. Fall back to the first
 		// configured key so the channel is not selected with no credential at

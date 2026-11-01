@@ -403,6 +403,7 @@ type ComplexityRoot struct {
 		GCP           func(childComplexity int) int
 		KeyGroups     func(childComplexity int) int
 		OAuth         func(childComplexity int) int
+		QuotaAPIKey   func(childComplexity int) int
 		VertexAPIKeys func(childComplexity int) int
 	}
 
@@ -1133,6 +1134,7 @@ type ComplexityRoot struct {
 		TestChannel                           func(childComplexity int, input TestChannelInput) int
 		TestChannelAPIKey                     func(childComplexity int, channelID objects.GUID, key string, modelID *string) int
 		TestChannelAPIKeys                    func(childComplexity int, channelID objects.GUID, modelID *string) int
+		TestChannelQuota                      func(childComplexity int, channelType string, baseURL string, quotaAPIKey string) int
 		TestCodexCatalog                      func(childComplexity int, channelID int) int
 		TriggerAutoBackup                     func(childComplexity int) int
 		TriggerGcCleanup                      func(childComplexity int, input gc.TriggerGcCleanupInput) int
@@ -1938,6 +1940,13 @@ type ComplexityRoot struct {
 		Success func(childComplexity int) int
 	}
 
+	TestChannelQuotaPayload struct {
+		ProviderType func(childComplexity int) int
+		QuotaData    func(childComplexity int) int
+		Ready        func(childComplexity int) int
+		Status       func(childComplexity int) int
+	}
+
 	Thread struct {
 		ArchivedTracesCount func(childComplexity int) int
 		CreatedAt           func(childComplexity int) int
@@ -2356,6 +2365,7 @@ type MutationResolver interface {
 	BulkRemoveChannelTags(ctx context.Context, ids []*objects.GUID, tags []string) (bool, error)
 	BulkManageChannelTags(ctx context.Context, ids []*objects.GUID, addTags []string, removeTags []string) (bool, error)
 	TestChannel(ctx context.Context, input TestChannelInput) (*TestChannelPayload, error)
+	TestChannelQuota(ctx context.Context, channelType string, baseURL string, quotaAPIKey string) (*TestChannelQuotaPayload, error)
 	TestChannelAPIKeys(ctx context.Context, channelID objects.GUID, modelID *string) (*TestChannelAPIKeysPayload, error)
 	TestChannelAPIKey(ctx context.Context, channelID objects.GUID, key string, modelID *string) (*TestAPIKeyResult, error)
 	BulkImportChannels(ctx context.Context, input BulkImportChannelsInput) (*biz.BulkImportChannelsResult, error)
@@ -3924,6 +3934,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.ChannelCredentials.OAuth(childComplexity), true
+	case "ChannelCredentials.quotaApiKey":
+		if e.complexity.ChannelCredentials.QuotaAPIKey == nil {
+			break
+		}
+
+		return e.complexity.ChannelCredentials.QuotaAPIKey(childComplexity), true
 	case "ChannelCredentials.vertexApiKeys":
 		if e.complexity.ChannelCredentials.VertexAPIKeys == nil {
 			break
@@ -7143,6 +7159,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Mutation.TestChannelAPIKeys(childComplexity, args["channelID"].(objects.GUID), args["modelID"].(*string)), true
+	case "Mutation.testChannelQuota":
+		if e.complexity.Mutation.TestChannelQuota == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_testChannelQuota_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.TestChannelQuota(childComplexity, args["channelType"].(string), args["baseURL"].(string), args["quotaApiKey"].(string)), true
 	case "Mutation.testCodexCatalog":
 		if e.complexity.Mutation.TestCodexCatalog == nil {
 			break
@@ -10970,6 +10997,31 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.complexity.TestChannelPayload.Success(childComplexity), true
 
+	case "TestChannelQuotaPayload.providerType":
+		if e.complexity.TestChannelQuotaPayload.ProviderType == nil {
+			break
+		}
+
+		return e.complexity.TestChannelQuotaPayload.ProviderType(childComplexity), true
+	case "TestChannelQuotaPayload.quotaData":
+		if e.complexity.TestChannelQuotaPayload.QuotaData == nil {
+			break
+		}
+
+		return e.complexity.TestChannelQuotaPayload.QuotaData(childComplexity), true
+	case "TestChannelQuotaPayload.ready":
+		if e.complexity.TestChannelQuotaPayload.Ready == nil {
+			break
+		}
+
+		return e.complexity.TestChannelQuotaPayload.Ready(childComplexity), true
+	case "TestChannelQuotaPayload.status":
+		if e.complexity.TestChannelQuotaPayload.Status == nil {
+			break
+		}
+
+		return e.complexity.TestChannelQuotaPayload.Status(childComplexity), true
+
 	case "Thread.archivedTracesCount":
 		if e.complexity.Thread.ArchivedTracesCount == nil {
 			break
@@ -13894,6 +13946,27 @@ func (ec *executionContext) field_Mutation_testChannelAPIKeys_args(ctx context.C
 		return nil, err
 	}
 	args["modelID"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_testChannelQuota_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "channelType", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["channelType"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "baseURL", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["baseURL"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "quotaApiKey", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["quotaApiKey"] = arg2
 	return args, nil
 }
 
@@ -22474,6 +22547,8 @@ func (ec *executionContext) fieldContext_Channel_credentials(_ context.Context, 
 				return ec.fieldContext_ChannelCredentials_apiKey(ctx, field)
 			case "apiKeys":
 				return ec.fieldContext_ChannelCredentials_apiKeys(ctx, field)
+			case "quotaApiKey":
+				return ec.fieldContext_ChannelCredentials_quotaApiKey(ctx, field)
 			case "keyGroups":
 				return ec.fieldContext_ChannelCredentials_keyGroups(ctx, field)
 			case "vertexApiKeys":
@@ -22718,6 +22793,35 @@ func (ec *executionContext) _ChannelCredentials_apiKeys(ctx context.Context, fie
 }
 
 func (ec *executionContext) fieldContext_ChannelCredentials_apiKeys(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ChannelCredentials",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ChannelCredentials_quotaApiKey(ctx context.Context, field graphql.CollectedField, obj *objects.ChannelCredentials) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ChannelCredentials_quotaApiKey,
+		func(ctx context.Context) (any, error) {
+			return obj.QuotaAPIKey, nil
+		},
+		nil,
+		ec.marshalOString2string,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ChannelCredentials_quotaApiKey(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "ChannelCredentials",
 		Field:      field,
@@ -36018,6 +36122,57 @@ func (ec *executionContext) fieldContext_Mutation_testChannel(ctx context.Contex
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_testChannel_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_testChannelQuota(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_testChannelQuota,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Mutation().TestChannelQuota(ctx, fc.Args["channelType"].(string), fc.Args["baseURL"].(string), fc.Args["quotaApiKey"].(string))
+		},
+		nil,
+		ec.marshalNTestChannelQuotaPayload2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐTestChannelQuotaPayload,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_testChannelQuota(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "providerType":
+				return ec.fieldContext_TestChannelQuotaPayload_providerType(ctx, field)
+			case "status":
+				return ec.fieldContext_TestChannelQuotaPayload_status(ctx, field)
+			case "ready":
+				return ec.fieldContext_TestChannelQuotaPayload_ready(ctx, field)
+			case "quotaData":
+				return ec.fieldContext_TestChannelQuotaPayload_quotaData(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type TestChannelQuotaPayload", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_testChannelQuota_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -58906,6 +59061,122 @@ func (ec *executionContext) fieldContext_TestChannelPayload_error(_ context.Cont
 	return fc, nil
 }
 
+func (ec *executionContext) _TestChannelQuotaPayload_providerType(ctx context.Context, field graphql.CollectedField, obj *TestChannelQuotaPayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelQuotaPayload_providerType,
+		func(ctx context.Context) (any, error) {
+			return obj.ProviderType, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelQuotaPayload_providerType(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelQuotaPayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TestChannelQuotaPayload_status(ctx context.Context, field graphql.CollectedField, obj *TestChannelQuotaPayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelQuotaPayload_status,
+		func(ctx context.Context) (any, error) {
+			return obj.Status, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelQuotaPayload_status(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelQuotaPayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TestChannelQuotaPayload_ready(ctx context.Context, field graphql.CollectedField, obj *TestChannelQuotaPayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelQuotaPayload_ready,
+		func(ctx context.Context) (any, error) {
+			return obj.Ready, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelQuotaPayload_ready(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelQuotaPayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TestChannelQuotaPayload_quotaData(ctx context.Context, field graphql.CollectedField, obj *TestChannelQuotaPayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelQuotaPayload_quotaData,
+		func(ctx context.Context) (any, error) {
+			return obj.QuotaData, nil
+		},
+		nil,
+		ec.marshalNJSONRawMessage2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐJSONRawMessage,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelQuotaPayload_quotaData(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelQuotaPayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type JSONRawMessage does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Thread_id(ctx context.Context, field graphql.CollectedField, obj *ent.Thread) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -69756,7 +70027,7 @@ func (ec *executionContext) unmarshalInputChannelCredentialsInput(ctx context.Co
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"apiKey", "apiKeys", "keyGroups", "vertexApiKeys", "gcp", "oauth", "managementApiKey"}
+	fieldsInOrder := [...]string{"apiKey", "apiKeys", "quotaApiKey", "keyGroups", "vertexApiKeys", "gcp", "oauth", "managementApiKey"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -69777,6 +70048,13 @@ func (ec *executionContext) unmarshalInputChannelCredentialsInput(ctx context.Co
 				return it, err
 			}
 			it.APIKeys = data
+		case "quotaApiKey":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("quotaApiKey"))
+			data, err := ec.unmarshalOString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.QuotaAPIKey = data
 		case "keyGroups":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("keyGroups"))
 			data, err := ec.unmarshalOKeyGroupInput2ᚕgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐKeyGroupᚄ(ctx, v)
@@ -98002,6 +98280,8 @@ func (ec *executionContext) _ChannelCredentials(ctx context.Context, sel ast.Sel
 			out.Values[i] = ec._ChannelCredentials_apiKey(ctx, field, obj)
 		case "apiKeys":
 			out.Values[i] = ec._ChannelCredentials_apiKeys(ctx, field, obj)
+		case "quotaApiKey":
+			out.Values[i] = ec._ChannelCredentials_quotaApiKey(ctx, field, obj)
 		case "keyGroups":
 			out.Values[i] = ec._ChannelCredentials_keyGroups(ctx, field, obj)
 		case "vertexApiKeys":
@@ -103549,6 +103829,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "testChannel":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_testChannel(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "testChannelQuota":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_testChannelQuota(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -112685,6 +112972,60 @@ func (ec *executionContext) _TestChannelPayload(ctx context.Context, sel ast.Sel
 			out.Values[i] = ec._TestChannelPayload_message(ctx, field, obj)
 		case "error":
 			out.Values[i] = ec._TestChannelPayload_error(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var testChannelQuotaPayloadImplementors = []string{"TestChannelQuotaPayload"}
+
+func (ec *executionContext) _TestChannelQuotaPayload(ctx context.Context, sel ast.SelectionSet, obj *TestChannelQuotaPayload) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, testChannelQuotaPayloadImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("TestChannelQuotaPayload")
+		case "providerType":
+			out.Values[i] = ec._TestChannelQuotaPayload_providerType(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "status":
+			out.Values[i] = ec._TestChannelQuotaPayload_status(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "ready":
+			out.Values[i] = ec._TestChannelQuotaPayload_ready(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "quotaData":
+			out.Values[i] = ec._TestChannelQuotaPayload_quotaData(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -122234,6 +122575,20 @@ func (ec *executionContext) marshalNTestChannelPayload2ᚖgithubᚗcomᚋlooplj�
 		return graphql.Null
 	}
 	return ec._TestChannelPayload(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNTestChannelQuotaPayload2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐTestChannelQuotaPayload(ctx context.Context, sel ast.SelectionSet, v TestChannelQuotaPayload) graphql.Marshaler {
+	return ec._TestChannelQuotaPayload(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNTestChannelQuotaPayload2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐTestChannelQuotaPayload(ctx context.Context, sel ast.SelectionSet, v *TestChannelQuotaPayload) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._TestChannelQuotaPayload(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalNThreadConnection2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐThreadConnection(ctx context.Context, sel ast.SelectionSet, v ent.ThreadConnection) graphql.Marshaler {

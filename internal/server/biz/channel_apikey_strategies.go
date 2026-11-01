@@ -90,6 +90,60 @@ func selectableKeys(ch *Channel) []string {
 	return enabled
 }
 
+// selectableKeysForRequest removes keys already tried by a failed same-channel
+// attempt. A request-scoped exclusion never changes the channel's shared
+// selection state, so normal traffic and trace stickiness keep their behavior.
+func selectableKeysForRequest(ctx context.Context, ch *Channel) []string {
+	enabled := selectableKeys(ch)
+	excluded := contexts.GetChannelAPIKeyRetryExclusions(ctx, ch.ID)
+	if len(excluded) == 0 {
+		return enabled
+	}
+
+	eligible := make([]string, 0, len(enabled))
+	for _, key := range enabled {
+		if _, skip := excluded[key]; !skip {
+			eligible = append(eligible, key)
+		}
+	}
+
+	// PrepareForRetry prevents this fallback when another key exists. Keeping it
+	// here ensures a stale/edge snapshot can still produce a non-empty auth key.
+	if len(eligible) == 0 {
+		return enabled
+	}
+
+	return eligible
+}
+
+// retrySafeSelection moves a stateful provider's remembered selection forward to
+// the next key not excluded for this request. It deliberately does not mutate
+// that provider's cross-request cursor.
+func retrySafeSelection(ctx context.Context, ch *Channel, selectedKey string) string {
+	excluded := contexts.GetChannelAPIKeyRetryExclusions(ctx, ch.ID)
+	if len(excluded) == 0 {
+		return selectedKey
+	}
+	if _, skip := excluded[selectedKey]; !skip {
+		return selectedKey
+	}
+
+	enabled := selectableKeys(ch)
+	start := slices.Index(enabled, selectedKey)
+	if start < 0 {
+		start = 0
+	}
+
+	for i := range len(enabled) {
+		key := enabled[(start+i)%len(enabled)]
+		if _, skip := excluded[key]; !skip {
+			return key
+		}
+	}
+
+	return selectedKey
+}
+
 // positionOf returns the index of cursorKey inside all. When the key is absent
 // (removed from the channel) it returns cursorIdx, so a walk continues from
 // where the key used to sit instead of restarting at the head of the array.
@@ -137,7 +191,7 @@ func NewRandomKeyProvider(channel *Channel) *RandomKeyProvider {
 }
 
 func (p *RandomKeyProvider) Get(ctx context.Context) string {
-	enabled := selectableKeys(p.channel)
+	enabled := selectableKeysForRequest(ctx, p.channel)
 
 	//nolint:gosec // not a security issue, just a random selection.
 	selectedKey := enabled[rand.IntN(len(enabled))]
@@ -172,10 +226,7 @@ func (p *sharedStickyKeyProvider) Get(ctx context.Context) string {
 
 	ch := p.channel
 
-	enabled := ch.cachedEnabledAPIKeys
-	if len(enabled) == 0 {
-		return ch.Credentials.APIKeys[0]
-	}
+	enabled := selectableKeysForRequest(ctx, ch)
 
 	if len(enabled) == 1 {
 		return enabled[0]
@@ -185,6 +236,7 @@ func (p *sharedStickyKeyProvider) Get(ctx context.Context) string {
 
 	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil {
 		selectedKey = p.state.stickyKeyFor(ch, trace.TraceID)
+		selectedKey = retrySafeSelection(ctx, ch, selectedKey)
 
 		if log.DebugEnabled(ctx) {
 			log.Debug(ctx, "Trace sticky key selected",
@@ -242,13 +294,14 @@ func (p *RoundRobinKeyProvider) Get(ctx context.Context) string {
 	if p.state != nil {
 		selectedKey = p.state.nextRoundRobinKey(ch, p.per)
 	} else {
-		enabled := selectableKeys(ch)
+		enabled := selectableKeysForRequest(ctx, ch)
 
 		//nolint:gosec // G115 - per is normalized to >= 1 at construction.
 		index := (p.fallback.Add(1) - 1) / uint64(p.per) % uint64(len(enabled))
 		selectedKey = enabled[index]
 	}
 
+	selectedKey = retrySafeSelection(ctx, ch, selectedKey)
 	contexts.WithChannelAPIKey(ctx, selectedKey)
 
 	return selectedKey
@@ -275,13 +328,14 @@ func (p *RoundRobinSuccessKeyProvider) Get(ctx context.Context) string {
 	if p.state == nil {
 		// Defensive: without shared state there is nothing to advance, so behave
 		// like a static first-key selection.
-		enabled := selectableKeys(p.channel)
+		enabled := selectableKeysForRequest(ctx, p.channel)
 		contexts.WithChannelAPIKey(ctx, enabled[0])
 
 		return enabled[0]
 	}
 
 	selectedKey := p.state.selectRoundRobinSuccessKey(p.channel)
+	selectedKey = retrySafeSelection(ctx, p.channel, selectedKey)
 
 	contexts.WithChannelAPIKey(ctx, selectedKey)
 
@@ -300,7 +354,7 @@ func NewPriorityKeyProvider(channel *Channel) *PriorityKeyProvider {
 }
 
 func (p *PriorityKeyProvider) Get(ctx context.Context) string {
-	enabled := selectableKeys(p.channel)
+	enabled := selectableKeysForRequest(ctx, p.channel)
 	selectedKey := enabled[0]
 
 	contexts.WithChannelAPIKey(ctx, selectedKey)
@@ -330,13 +384,14 @@ func (p *FixedKeyProvider) Get(ctx context.Context) string {
 	if p.state == nil {
 		// Defensive: without shared state there is nothing to remember, so fall
 		// back to the first selectable key.
-		enabled := selectableKeys(p.channel)
+		enabled := selectableKeysForRequest(ctx, p.channel)
 		contexts.WithChannelAPIKey(ctx, enabled[0])
 
 		return enabled[0]
 	}
 
 	selectedKey := p.state.selectFixedKey(p.channel)
+	selectedKey = retrySafeSelection(ctx, p.channel, selectedKey)
 
 	contexts.WithChannelAPIKey(ctx, selectedKey)
 

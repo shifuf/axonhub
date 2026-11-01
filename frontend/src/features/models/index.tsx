@@ -18,12 +18,20 @@ import ModelsProvider, { useModels } from './context/models-context';
 import { useQueryAllModels } from './data/models';
 import { ModelsCatalogStatus } from './components/models-catalog-status';
 import { useDevelopersData } from './data/providers';
+import { useFrozenModelChannelsBatch } from './data/frozen-model-channels';
+import { useCooldownNow } from '@/features/channels/components/cooldown-details';
 
 function ModelsContent() {
   useDevelopersData();
   const { t } = useTranslation();
   const { modelPermissions } = usePermissions();
   const [nameFilter, setNameFilter] = useState<string>('');
+  const [visibleModelIDs, setVisibleModelIDs] = useState<string[]>([]);
+  const handleVisibleModelIDsChange = useCallback((ids: string[]) => {
+    setVisibleModelIDs((previous) =>
+      previous.length === ids.length && previous.every((id, index) => id === ids[index]) ? previous : ids,
+    );
+  }, []);
   const [sorting, setSorting] = useState<SortingState>(() => {
     const stored = localStorage.getItem('models-table-sorting');
     if (stored) {
@@ -62,12 +70,19 @@ function ModelsContent() {
     [setNameFilter]
   );
 
-  const columns = useMemo(() => createColumns(t, modelPermissions.canWrite), [t, modelPermissions.canWrite]);
+  const models = useMemo(() => data?.edges?.map((edge) => edge.node) ?? [], [data]);
+  const currentModelIDs = useMemo(() => new Set(models.map((model) => model.modelID)), [models]);
+  const { data: frozenChannels } = useFrozenModelChannelsBatch(visibleModelIDs.filter((id) => currentModelIDs.has(id)));
+  const now = useCooldownNow(frozenChannels !== undefined);
+  const columns = useMemo(
+    () => createColumns(t, modelPermissions.canWrite, frozenChannels, now),
+    [t, modelPermissions.canWrite, frozenChannels, now],
+  );
 
   return (
     <div className='flex flex-1 flex-col overflow-hidden'>
       <ModelsTable
-        data={data?.edges?.map((edge) => edge.node) || []}
+        data={models}
         columns={columns}
         loading={isLoading}
         totalCount={data?.totalCount}
@@ -75,6 +90,7 @@ function ModelsContent() {
         sorting={sorting}
         onSortingChange={setSorting}
         onNameFilterChange={handleNameFilterChange}
+        onVisibleModelIDsChange={handleVisibleModelIDsChange}
         canWrite={modelPermissions.canWrite}
       />
     </div>

@@ -351,6 +351,68 @@ func (p *TokenProvider) EnsureFresh(ctx context.Context, refreshBefore time.Dura
 	}
 }
 
+// ForceRefresh refreshes OAuth credentials even when the current access token
+// still looks unexpired. It is used after an upstream 401 invalidates a token
+// before its advertised expiry.
+func (p *TokenProvider) ForceRefresh(ctx context.Context) (*OAuthCredentials, error) {
+	for {
+		v, err, _ := p.sf.Do("refresh", func() (any, error) {
+			p.mu.RLock()
+			current := p.creds
+			onRefreshed := p.onRefreshed
+			p.mu.RUnlock()
+
+			if current == nil {
+				return nil, fmt.Errorf("credentials is nil")
+			}
+
+			fresh, err := p.refresh(ctx, current)
+			if err != nil {
+				return nil, err
+			}
+
+			retryExpired := false
+			if onRefreshed != nil {
+				if err := onRefreshed(ctx, fresh); err != nil {
+					var conflict *CredentialConflictError
+					if errors.As(err, &conflict) {
+						fresh = conflict.Credentials
+						retryExpired = fresh != nil
+					} else {
+						slog.WarnContext(ctx, "failed to persist forced OAuth refresh", slog.Any("error", err))
+					}
+				}
+			}
+
+			p.mu.Lock()
+			p.creds = fresh
+			p.mu.Unlock()
+			if fresh == nil {
+				p.StopAutoRefresh()
+				return nil, errors.New("credentials is nil")
+			}
+
+			return refreshResult{credentials: fresh, retryExpired: retryExpired}, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		result, ok := v.(refreshResult)
+		if !ok {
+			return nil, fmt.Errorf("singleflight returned unexpected type %T", v)
+		}
+		if result.retryExpired && result.credentials.RefreshToken != "" && result.credentials.IsExpired(time.Now()) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		return result.credentials, nil
+	}
+}
+
 func (p *TokenProvider) StartAutoRefresh(ctx context.Context, opts AutoRefreshOptions) {
 	slog.DebugContext(ctx, "start auto refresh token provider")
 

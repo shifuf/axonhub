@@ -35,6 +35,10 @@ func IsUpstreamTransportError(err error) bool {
 		return false
 	}
 
+	if errors.Is(err, httpclient.ErrStreamIdleTimeout) {
+		return true
+	}
+
 	// Already carries a status code or structured detail: nothing to classify.
 	if _, ok := errors.AsType[*httpclient.Error](err); ok {
 		return false

@@ -44,20 +44,21 @@ func TestResponsesStream_ConversionOutcome_when_SourceEnds(t *testing.T) {
 					h := &ChatCompletionHandlers{streamAdapterFactory: newResponsesStreamAdapter, ChatCompletionOrchestrator: &orchestrator.ChatCompletionOrchestrator{SystemService: svc}, sseKeepAlive: SSEKeepAliveConfig{Enabled: heartbeat, Interval: time.Hour}, sseHeartbeatFormat: sseHeartbeatOpenAI}
 					// When
 					h.writeSSEStream(c, newUpstreamErrorStream(ctx, converted, svc))
-					// Then partial content is retained and cancellation produces no error.
+					// The downstream context is still live, so a canceled source must
+					// retain partial content and deliver a classified error, not EOF.
 					body := w.Body.String()
 					require.Contains(t, body, `"delta":"hello"`)
 					failures := strings.Count(body, "event:error\n") + strings.Count(body, "event:response.failed\n")
 					if errors.Is(sourceErr, context.Canceled) {
-						require.Zero(t, failures)
-						return
+						require.NoError(t, ctx.Err())
+						require.Contains(t, body, `"code":"stream_processing_canceled"`)
 					}
 					require.Equal(t, 1, failures)
 					require.NotContains(t, body, "event:response.completed")
-					if mode == biz.UpstreamErrorModeCustom && !errors.Is(sourceErr, context.DeadlineExceeded) {
+					if mode == biz.UpstreamErrorModeCustom && !errors.Is(sourceErr, context.DeadlineExceeded) && !errors.Is(sourceErr, context.Canceled) {
 						require.Contains(t, body, "safe conversion failure")
 					}
-					if mode == biz.UpstreamErrorModeHidden && !errors.Is(sourceErr, context.DeadlineExceeded) {
+					if mode == biz.UpstreamErrorModeHidden && !errors.Is(sourceErr, context.DeadlineExceeded) && !errors.Is(sourceErr, context.Canceled) {
 						require.Contains(t, body, biz.DefaultUpstreamErrorMessage)
 					}
 					decoder := httpclient.NewDefaultSSEDecoder(ctx, io.NopCloser(strings.NewReader(body)))

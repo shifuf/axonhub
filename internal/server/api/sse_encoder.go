@@ -30,6 +30,15 @@ func encodeStreamError(formatErr StreamErrorFormatter) StreamErrorEncoder {
 
 func (h *ChatCompletionHandlers) writeSSEStream(c *gin.Context, stream streams.Stream[*httpclient.StreamEvent]) {
 	encodeErr := encodeStreamError(FormatStreamError)
+	if h.sseHeartbeatFormat == sseHeartbeatAnthropic {
+		encodeErr = encodeStreamError(func(ctx context.Context, err error) any {
+			// Anthropic requires a top-level event discriminator in addition to
+			// the nested error category; keep the upstream details/request ID.
+			payload := FormatStreamError(ctx, err).(gin.H)
+			payload["type"] = "error"
+			return payload
+		})
+	}
 	if h.streamAdapterFactory != nil {
 		var systemService *biz.SystemService
 		if h.ChatCompletionOrchestrator != nil {

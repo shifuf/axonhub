@@ -64,6 +64,7 @@ type Channel struct {
 
 	startTokenProvider func()
 	stopTokenProvider  func()
+	refreshToken       func(context.Context) error
 
 	// cachedOverrideOps stores the parsed override operations to avoid repeated JSON parsing
 	cachedOverrideOps []objects.OverrideOperation

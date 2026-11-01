@@ -189,6 +189,16 @@ func (s *streamLifecycle) watch() {
 	}()
 	select {
 	case <-s.downstream.Done():
+		if errors.Is(s.downstream.Err(), context.DeadlineExceeded) {
+			if _, inherited := s.execution.Deadline(); inherited {
+				// The execution has the same deadline, but its timer may not
+				// have run yet. Calling CancelCauseFunc first permanently sets
+				// Err() to Canceled (even with a DeadlineExceeded cause), which
+				// misclassifies gateway timeouts as client cancellations. Let
+				// the already-due inherited deadline win before cleanup.
+				<-s.execution.Done()
+			}
+		}
 		s.downstreamEnded(s.downstream.Err())
 	case <-s.shutdownDone():
 		s.downstreamEnded(context.Cause(s.shutdown))
