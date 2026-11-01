@@ -242,6 +242,10 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 	}
 
 	var pipelineOpts []pipeline.Option
+	pipelineOpts = append(pipelineOpts, pipeline.WithResponseTimeouts(
+		time.Duration(retryPolicy.StreamFirstEventTimeoutSeconds)*time.Second,
+		time.Duration(retryPolicy.NonStreamResponseTimeoutSeconds)*time.Second,
+	))
 
 	// Only apply retry if policy is enabled
 	if retryPolicy.Enabled {
@@ -255,10 +259,6 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 			pipelineOpts = append(pipelineOpts, pipeline.WithEmptyResponseDetection())
 		}
 
-		pipelineOpts = append(pipelineOpts, pipeline.WithResponseTimeouts(
-			time.Duration(retryPolicy.StreamFirstEventTimeoutSeconds)*time.Second,
-			time.Duration(retryPolicy.NonStreamResponseTimeoutSeconds)*time.Second,
-		))
 	} else {
 		// Retries are switched off globally: a channel-level override must not
 		// turn same-channel retries back on.

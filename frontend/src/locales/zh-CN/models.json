@@ -1,4 +1,5 @@
 {
+  "models.cooldown.frozenOnChannel": "模型在渠道 {{channel}} 已冷冻",
   "models.title": "模型",
   "models.description": "配置 AI 模型关联、能力和回退规则。",
   "models.columns.icon": "图标",

@@ -31,6 +31,14 @@ func TestIsUpstreamTransportError(t *testing.T) {
 		{name: "plain error", err: errors.New("boom"), want: false},
 		{name: "http error", err: &httpclient.Error{StatusCode: http.StatusBadGateway, Body: []byte(`{}`)}, want: false},
 		{name: "response error", err: &llm.ResponseError{StatusCode: http.StatusTooManyRequests}, want: false},
+		{
+			name: "structured response error takes precedence over idle cause",
+			err: &llm.ResponseError{
+				StatusCode: http.StatusBadRequest,
+				Cause:      httpclient.ErrStreamIdleTimeout,
+			},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -76,6 +76,7 @@ func NewHttpClientWithProxy(proxyConfig *ProxyConfig, opts ...ClientOption) *Htt
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
 	}
 
 	if options.insecureSkipVerify {
@@ -224,26 +225,28 @@ func NewHttpClient(opts ...ClientOption) *HttpClient {
 
 	client := &http.Client{}
 
-	if options.insecureSkipVerify {
-		var transport *http.Transport
-		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
-			transport = defaultTransport.Clone()
-		} else {
-			// Fall back to a transport close to http.DefaultTransport when it has been replaced.
-			transport = (&http.Transport{
-				Proxy: getProxyFunc(nil),
-				DialContext: (&net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			})
-		}
+	var transport *http.Transport
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		// Fall back to a transport close to http.DefaultTransport when it has been replaced.
+		transport = (&http.Transport{
+			Proxy: getProxyFunc(nil),
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
+		})
+	}
+	transport.ResponseHeaderTimeout = DefaultResponseHeaderTimeout
 
+	if options.insecureSkipVerify {
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{}
 		} else {
@@ -251,8 +254,8 @@ func NewHttpClient(opts ...ClientOption) *HttpClient {
 		}
 
 		transport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // User-configured option for self-signed certificates
-		client.Transport = transport
 	}
+	client.Transport = transport
 
 	return &HttpClient{
 		client: client,
@@ -439,7 +442,9 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 		decoderFactory = NewDefaultSSEDecoder
 	}
 
-	stream := decoderFactory(ctx, rawResp.Body)
+	idleBody := newIdleTimeoutReadCloser(rawResp.Body, DefaultStreamIdleTimeout)
+	stream := decoderFactory(ctx, idleBody)
+	stream = withIdleTimeout(ctx, stream, idleBody)
 	responseHeaders := make(http.Header)
 	if value := rawResp.Header.Get("X-Codex-Turn-State"); value != "" {
 		responseHeaders.Set("X-Codex-Turn-State", value)

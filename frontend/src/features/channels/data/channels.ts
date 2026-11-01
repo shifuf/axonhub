@@ -1722,6 +1722,7 @@ export function useUpdateChannel() {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       queryClient.invalidateQueries({ queryKey: ['channel', data.id] });
       toast.success(t('channels.messages.updateSuccess'));
     },
@@ -1897,6 +1898,7 @@ export function useUpdateChannelStatus() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       const statusText =
         variables.status === 'enabled'
           ? t('channels.status.enabled')
@@ -1928,6 +1930,7 @@ export function useBulkArchiveChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkArchiveSuccess', { count: variables.length }));
     },
   });
@@ -1950,6 +1953,7 @@ export function useBulkDisableChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkDisableSuccess', { count: variables.length }));
     },
   });
@@ -1972,6 +1976,7 @@ export function useBulkEnableChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkEnableSuccess', { count: variables.length }));
     },
   });
@@ -1994,6 +1999,7 @@ export function useBulkRecoverChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       queryClient.invalidateQueries({ queryKey: ['errorChannelsCount'] });
       toast.success(t('channels.messages.bulkRecoverSuccess', { count: variables.length }));
     },
@@ -2017,6 +2023,7 @@ export function useDeleteChannel() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.deleteSuccess'));
     },
   });
@@ -2039,6 +2046,7 @@ export function useBulkDeleteChannels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('channels.messages.bulkDeleteSuccess', { count: variables.length }));
     },
   });
@@ -2065,6 +2073,7 @@ export function useBulkManageChannelTags() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['channels'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       queryClient.invalidateQueries({ queryKey: ['allChannelSummarys'] });
       queryClient.invalidateQueries({ queryKey: ['allChannelTags'] });
       queryClient.invalidateQueries({ queryKey: ['selectedChannelTags'] });

@@ -235,7 +235,12 @@ func (svc *ChannelService) markChannelModelCooldownPermanent(ctx context.Context
 // markChannelModelCooldown records the client-cancellation variant of a model freeze.
 func (svc *ChannelService) markChannelModelCooldown(ctx context.Context, channelID int, requestModel string, count, windowMinutes, cooldownMinutes int) bool {
 	expiresAt := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
-	reason := fmt.Sprintf("Client cancellation cooldown: %d cancellations within %d minutes, auto-recover after %d minutes", max(count, 1), windowMinutes, cooldownMinutes)
+	effectiveCount := max(count, 1)
+	noun := "cancellations"
+	if effectiveCount == 1 {
+		noun = "cancellation"
+	}
+	reason := fmt.Sprintf("Client cancellation cooldown: %d %s within %d minutes, auto-recover after %d minutes", effectiveCount, noun, windowMinutes, cooldownMinutes)
 	return svc.markChannelModelCooldownUntil(ctx, channelID, requestModel, reason, &expiresAt)
 }
 

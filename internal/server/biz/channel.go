@@ -64,6 +64,7 @@ type Channel struct {
 
 	startTokenProvider func()
 	stopTokenProvider  func()
+	refreshToken       func(context.Context) error
 
 	// cachedOverrideOps stores the parsed override operations to avoid repeated JSON parsing
 	cachedOverrideOps []objects.OverrideOperation
@@ -1346,8 +1347,8 @@ func (c *Channel) GetEnabledAPIKeys() []string {
 	return c.cachedEnabledAPIKeys
 }
 
-// enabledAPIKeysForRequest returns the API keys eligible for the current
-// request.
+// GetEnabledAPIKeysForModel returns the API keys eligible for a request routed
+// to model.
 //
 // Channels without key groups use the cached enabled set unchanged. Channels
 // with key groups select from enabled groups only: keys whose model allowlist
@@ -1356,25 +1357,41 @@ func (c *Channel) GetEnabledAPIKeys() []string {
 // A key carrying a disable record is always excluded, and an empty result tells
 // the caller to fall back to a configured key so a request is never dispatched
 // with no credential.
-func (c *Channel) enabledAPIKeysForRequest(ctx context.Context) []string {
-	if !c.Credentials.HasKeyGroups() {
-		return c.cachedEnabledAPIKeys
+func (c *Channel) GetEnabledAPIKeysForModel(model string) []string {
+	if c == nil {
+		return nil
 	}
 
-	model, _ := contexts.GetRequestModel(ctx)
+	enabled := c.cachedEnabledAPIKeys
+	if enabled == nil {
+		// Tests and partially constructed snapshots may not have run buildChannel
+		// yet. A non-nil empty cache is meaningful (all keys disabled), so only a
+		// nil cache falls back to the entity.
+		enabled = c.Credentials.GetEnabledAPIKeys(c.DisabledAPIKeys)
+	}
+	if !c.Credentials.HasKeyGroups() {
+		return enabled
+	}
 
 	if matched, ok := c.Credentials.EnabledGroupKeysForModel(model); ok {
-		if enabled := lo.Intersect(matched, c.cachedEnabledAPIKeys); len(enabled) > 0 {
-			return enabled
+		if eligible := lo.Intersect(matched, enabled); len(eligible) > 0 {
+			return eligible
 		}
 	}
 
 	// No model-specific match: fall back to every enabled group key.
-	if enabled := lo.Intersect(c.Credentials.EnabledGroupKeys(), c.cachedEnabledAPIKeys); len(enabled) > 0 {
-		return enabled
+	if eligible := lo.Intersect(c.Credentials.EnabledGroupKeys(), enabled); len(eligible) > 0 {
+		return eligible
 	}
 
 	return nil
+}
+
+// EnabledAPIKeysForRequest returns the API keys eligible for the model stored
+// in the current request context.
+func (c *Channel) EnabledAPIKeysForRequest(ctx context.Context) []string {
+	model, _ := contexts.GetRequestModel(ctx)
+	return c.GetEnabledAPIKeysForModel(model)
 }
 
 // anyConfiguredAPIKey returns some key to send when no enabled key matches, so a

@@ -105,6 +105,34 @@ func TestTraceStickyKeyProvider_KeyGroups_DisableRecordExcludesKey(t *testing.T)
 	}
 }
 
+func TestTraceStickyKeyProvider_KeyGroups_ExcludedCachedKeyIsNotReselected(t *testing.T) {
+	ch := newGroupedChannel([]objects.KeyGroup{
+		{Name: "rotating", APIKeys: []string{"key-a", "key-b", "key-c"}, Models: []string{"gpt-5"}, Enabled: true},
+	}, nil)
+	ch.ID = 77
+
+	provider := NewTraceStickyKeyProvider(ch)
+	ctx := contexts.WithRequestModel(context.Background(), "gpt-5")
+	ctx = contexts.WithTrace(ctx, &ent.Trace{ID: 1, TraceID: "trace-sticky-exclusion"})
+
+	first := provider.Get(ctx)
+	contexts.ExcludeChannelAPIKeyForRetry(ctx, ch.ID, first)
+
+	for range 20 {
+		require.NotEqual(t, first, provider.Get(ctx))
+	}
+}
+
+func TestChannel_GetEnabledAPIKeysForModel_UsesModelScope(t *testing.T) {
+	ch := newGroupedChannel([]objects.KeyGroup{
+		{Name: "codex", APIKey: "key-codex", Models: []string{"gpt-5-codex"}, Enabled: true},
+		{Name: "chat", APIKey: "key-chat", Models: []string{"gpt-5"}, Enabled: true},
+	}, nil)
+
+	require.Equal(t, []string{"key-codex"}, ch.GetEnabledAPIKeysForModel("gpt-5-codex"))
+	require.Equal(t, []string{"key-chat"}, ch.GetEnabledAPIKeysForModel("gpt-5"))
+}
+
 func TestTraceStickyKeyProvider_NoKeyGroups_UsesFlatKeys(t *testing.T) {
 	keys := []string{"key-1", "key-2"}
 	ch := &Channel{

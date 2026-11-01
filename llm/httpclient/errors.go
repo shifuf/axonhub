@@ -46,9 +46,21 @@ func ParseRetryAfter(err error) (time.Duration, bool) {
 		return 0, false
 	}
 
-	value := httpErr.Headers.Get("Retry-After")
+	duration, ok := ParseRetryAfterHeader(httpErr.Headers)
+	if ok {
+		return duration, true
+	}
+
+	return DefaultRetryAfterSeconds * time.Second, true
+}
+
+// ParseRetryAfterHeader parses a Retry-After header for any upstream status.
+// It returns false when the header is absent. Invalid values fall back to the
+// default duration, and every non-zero value is capped at the maximum.
+func ParseRetryAfterHeader(headers http.Header) (time.Duration, bool) {
+	value := headers.Get("Retry-After")
 	if value == "" {
-		return DefaultRetryAfterSeconds * time.Second, true
+		return 0, false
 	}
 
 	// 1. Try to parse as integer seconds (delta-seconds)

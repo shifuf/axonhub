@@ -44,6 +44,10 @@ func IsUpstreamTransportError(err error) bool {
 		return false
 	}
 
+	if errors.Is(err, httpclient.ErrStreamIdleTimeout) {
+		return true
+	}
+
 	if errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, llm.ErrStreamIncomplete) ||

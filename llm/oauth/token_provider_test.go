@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -227,6 +228,63 @@ func TestTokenProviderGetRefreshFlowSingleflight(t *testing.T) {
 	require.Equal(t, "access-2", r2.AccessToken)
 	require.Equal(t, int32(1), calls.Load())
 	require.Equal(t, int32(1), refreshed.Load())
+}
+
+func TestTokenProviderForceRefreshUnexpiredCredentials(t *testing.T) {
+	var calls atomic.Int32
+	var refreshed atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		require.NoError(t, writeTokenResponse(w, "forced-access", "forced-refresh", 3600))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := NewTokenProvider(TokenProviderParams{
+		HTTPClient: httpclient.NewHttpClientWithClient(server.Client()),
+		OAuthUrls:  OAuthUrls{TokenUrl: server.URL + "/token"},
+		Credentials: &OAuthCredentials{
+			ClientID:     "client-1",
+			AccessToken:  "still-valid-access",
+			RefreshToken: "refresh-1",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+		OnRefreshed: func(ctx context.Context, credentials *OAuthCredentials) error {
+			refreshed.Add(1)
+			return nil
+		},
+	})
+
+	got, err := provider.ForceRefresh(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "forced-access", got.AccessToken)
+	require.Equal(t, int32(1), calls.Load())
+	require.Equal(t, int32(1), refreshed.Load())
+}
+
+func TestTokenProviderForceRefreshFailsClosedWhenPersistenceFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, writeTokenResponse(w, "forced-access", "forced-refresh", 3600))
+	}))
+	t.Cleanup(server.Close)
+
+	provider := NewTokenProvider(TokenProviderParams{
+		HTTPClient: httpclient.NewHttpClientWithClient(server.Client()),
+		OAuthUrls:  OAuthUrls{TokenUrl: server.URL + "/token"},
+		Credentials: &OAuthCredentials{
+			ClientID:     "client-1",
+			AccessToken:  "still-valid-access",
+			RefreshToken: "refresh-1",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+		OnRefreshed: func(context.Context, *OAuthCredentials) error {
+			return errors.New("database unavailable")
+		},
+	})
+
+	_, err := provider.ForceRefresh(context.Background())
+	require.ErrorContains(t, err, "failed to persist forced OAuth refresh")
+	require.Equal(t, "still-valid-access", provider.creds.AccessToken)
 }
 
 func TestTokenProviderGetUsesPersistedCredentialsAfterConflict(t *testing.T) {

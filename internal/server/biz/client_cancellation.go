@@ -20,6 +20,7 @@ const (
 	defaultClientCancellationCooldownMinutes = 30
 	defaultClientCancellationWindowMinutes   = 10
 	maxClientCancellationCooldownMinutes     = 7 * 24 * 60
+	maxClientCancellationThreshold           = 10_000
 )
 
 func normalizeClientCancellationPolicy(policy *ClientCancellationPolicy) error {
@@ -38,6 +39,9 @@ func normalizeClientCancellationPolicy(policy *ClientCancellationPolicy) error {
 
 	if policy.Threshold <= 0 {
 		policy.Threshold = defaultClientCancellationThreshold
+	}
+	if policy.Threshold > maxClientCancellationThreshold {
+		policy.Threshold = maxClientCancellationThreshold
 	}
 	if policy.WindowMinutes <= 0 {
 		policy.WindowMinutes = defaultClientCancellationWindowMinutes
@@ -75,6 +79,9 @@ func normalizeClientCancellationPolicy(policy *ClientCancellationPolicy) error {
 		}
 		if override.Threshold <= 0 {
 			override.Threshold = policy.Threshold
+		}
+		if override.Threshold > maxClientCancellationThreshold {
+			override.Threshold = maxClientCancellationThreshold
 		}
 		if override.WindowMinutes <= 0 {
 			override.WindowMinutes = policy.WindowMinutes

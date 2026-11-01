@@ -13,6 +13,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { DataTableColumnHeader } from '@/components/data-table-column-header';
 import { useModels } from '../context/models-context';
 import { Model } from '../data/schema';
+import { ModelFreezeBadges } from '@/features/channels/components/model-freeze-badges';
+import type { FrozenModelChannelsByModel } from '../data/frozen-model-channels';
 import { DataTableRowActions } from './data-table-row-actions';
 import { ModelsStatusDialog } from './models-status-dialog';
 import { useDeveloperLabel } from './models-table';
@@ -80,7 +82,12 @@ function AssociationRulesCell({ row }: { row: Row<Model> }) {
   );
 }
 
-export const createColumns = (t: ReturnType<typeof useTranslation>['t'], canWrite: boolean = true): ColumnDef<Model>[] => {
+export const createColumns = (
+  t: ReturnType<typeof useTranslation>['t'],
+  canWrite: boolean = true,
+  frozenChannels: FrozenModelChannelsByModel = {},
+  now: number = Date.now(),
+): ColumnDef<Model>[] => {
   return [
     {
       id: 'expand',
@@ -151,8 +158,11 @@ export const createColumns = (t: ReturnType<typeof useTranslation>['t'], canWrit
       cell: ({ row }) => {
         const model = row.original;
         return (
-          <div className='flex max-w-56 items-center gap-2'>
-            <div className='truncate font-medium'>{model.name}</div>
+          <div className='flex max-w-64 flex-col items-start gap-1'>
+            <div className='max-w-full truncate font-medium'>{model.name}</div>
+            {(Object.hasOwn(frozenChannels, model.modelID) ? frozenChannels[model.modelID] : []).map(({ channel, cooldowns }) => (
+              <ModelFreezeBadges key={channel.id} cooldowns={cooldowns} channelName={channel.name} now={now} />
+            ))}
           </div>
         );
       },

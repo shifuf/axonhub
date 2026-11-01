@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -337,10 +338,12 @@ func TestRateLimitTracking_OnOutboundRawError_429WithoutRetryAfter(t *testing.T)
 
 	middleware.OnOutboundRawError(ctx, httpErr)
 
-	assert.False(t, tracker.IsCoolingDown(channel.ID))
+	until, ok := tracker.GetCooldownUntil(channel.ID)
+	require.True(t, ok)
+	require.WithinDuration(t, time.Now().Add(time.Minute), until, 5*time.Second)
 }
 
-func TestRateLimitTracking_OnOutboundRawError_Not429(t *testing.T) {
+func TestRateLimitTracking_OnOutboundRawError_Retryable500UsesBaseCooldown(t *testing.T) {
 	tracker := NewChannelRequestTracker()
 
 	entChannel := &ent.Channel{ID: 1, Name: "test-channel"}
@@ -358,7 +361,6 @@ func TestRateLimitTracking_OnOutboundRawError_Not429(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Simulate 500 error (not 429)
 	httpErr := &httpclient.Error{
 		StatusCode: http.StatusInternalServerError,
 		Headers:    http.Header{"Retry-After": []string{"30"}},
@@ -366,8 +368,62 @@ func TestRateLimitTracking_OnOutboundRawError_Not429(t *testing.T) {
 
 	middleware.OnOutboundRawError(ctx, httpErr)
 
-	// Verify channel is NOT in cooldown
+	until, ok := tracker.GetCooldownUntil(channel.ID)
+	require.True(t, ok)
+	require.WithinDuration(t, time.Now().Add(time.Minute), until, 5*time.Second)
+}
+
+func TestRateLimitTracking_OnOutboundRawError_NonRetryable400Ignored(t *testing.T) {
+	tracker := NewChannelRequestTracker()
+	channel := &biz.Channel{Channel: &ent.Channel{ID: 1, Name: "test-channel"}}
+	state := &PersistenceState{
+		CurrentCandidate: &ChannelModelsCandidate{Channel: channel},
+	}
+	outbound := &PersistentOutboundTransformer{state: state}
+	middleware := &rateLimitTracking{outbound: outbound, tracker: tracker}
+
+	middleware.OnOutboundRawError(context.Background(), &httpclient.Error{
+		StatusCode: http.StatusBadRequest,
+		Headers:    http.Header{"Retry-After": []string{"300"}},
+	})
+
 	assert.False(t, tracker.IsCoolingDown(channel.ID))
+}
+
+func TestRateLimitTracking_OnOutboundRawError_RetryAfterOnlyExtendsAndCaps(t *testing.T) {
+	tests := []struct {
+		name       string
+		retryAfter string
+		want       time.Duration
+	}{
+		{name: "shorter header does not shrink base", retryAfter: "5", want: time.Minute},
+		{name: "longer header extends base", retryAfter: "120", want: 2 * time.Minute},
+		{name: "header is capped", retryAfter: "3600", want: 5 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewChannelRequestTracker()
+			channel := &biz.Channel{Channel: &ent.Channel{ID: 1, Name: "test-channel"}}
+			state := &PersistenceState{
+				CurrentCandidate: &ChannelModelsCandidate{Channel: channel},
+			}
+			middleware := &rateLimitTracking{
+				outbound: &PersistentOutboundTransformer{state: state},
+				tracker:  tracker,
+			}
+			now := time.Now()
+
+			middleware.OnOutboundRawError(context.Background(), &httpclient.Error{
+				StatusCode: http.StatusTooManyRequests,
+				Headers:    http.Header{"Retry-After": []string{tt.retryAfter}},
+			})
+
+			until, ok := tracker.GetCooldownUntil(channel.ID)
+			require.True(t, ok)
+			require.WithinDuration(t, now.Add(tt.want), until, 2*time.Second)
+		})
+	}
 }
 
 func TestRateLimitTracking_OnOutboundRawError_NoChannel(t *testing.T) {

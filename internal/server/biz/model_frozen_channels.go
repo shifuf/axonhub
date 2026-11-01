@@ -11,13 +11,13 @@ import (
 // FrozenModelChannel reports one channel that currently freezes the given
 // model, together with the active cooldown entries for that model.
 type FrozenModelChannel struct {
-	Channel   *ent.Channel        `json:"channel"`
+	Channel   *ent.Channel            `json:"channel"`
 	Cooldowns []objects.ModelCooldown `json:"cooldowns"`
 }
 
-// QueryFrozenModelChannels lists every enabled channel that currently has an
-// active cooldown for the requested model. Used by the models UI to surface
-// "this model is frozen on channel X" next to the model itself.
+// QueryFrozenModelChannels lists enabled and disabled channels that currently
+// have an active cooldown for the requested model. Used by the models UI to
+// surface "this model is frozen on channel X" next to the model itself.
 func (svc *ModelService) QueryFrozenModelChannels(ctx context.Context, modelID string) ([]*FrozenModelChannel, error) {
 	if modelID == "" {
 		return []*FrozenModelChannel{}, nil

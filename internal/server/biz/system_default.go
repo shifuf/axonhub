@@ -77,12 +77,13 @@ var defaultStoragePolicy = StoragePolicy{
 }
 
 var defaultRetryPolicy = RetryPolicy{
-	MaxChannelRetries:       3,
-	MaxSingleChannelRetries: 2,
-	RetryDelayMs:            1000,
-	LoadBalancerStrategy:    "adaptive",
-	TraceStickyMode:         TraceStickyPreferPreviousChannel,
-	Enabled:                 true,
+	MaxChannelRetries:               3,
+	MaxSingleChannelRetries:         2,
+	RetryDelayMs:                    1000,
+	NonStreamResponseTimeoutSeconds: 300,
+	LoadBalancerStrategy:            "adaptive",
+	TraceStickyMode:                 TraceStickyPreferPreviousChannel,
+	Enabled:                         true,
 	UpstreamErrorPolicy: UpstreamErrorPolicy{
 		Mode: UpstreamErrorModePassthrough,
 	},

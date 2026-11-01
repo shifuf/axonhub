@@ -241,6 +241,14 @@ func TestExtractStatusCodeFromError(t *testing.T) {
 			expected: http.StatusInternalServerError,
 		},
 		{
+			name: "outer llm.ResponseError takes precedence over cause",
+			err: &llm.ResponseError{
+				StatusCode: http.StatusBadRequest,
+				Cause:      &httpclient.Error{StatusCode: http.StatusTooManyRequests},
+			},
+			expected: http.StatusBadRequest,
+		},
+		{
 			name:     "wrapped httpclient.Error",
 			err:      errors.New("wrapped: " + (&httpclient.Error{StatusCode: 401}).Error()), // This won't work with errors.As unless we use fmt.Errorf with %w
 			expected: 0,

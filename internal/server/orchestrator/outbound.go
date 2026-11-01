@@ -636,6 +636,7 @@ type PersistentOutboundTransformer struct {
 	wrapped                       transformer.Outbound
 	state                         *PersistenceState
 	outboundLlmRequestMiddlewares []pipeline.OutboundLlmRequestMiddleware
+	preferAPIKeyRetry             bool
 }
 
 func shouldForceStreamingForCandidate(candidate *ChannelModelsCandidate, req *llm.Request) bool {
@@ -991,6 +992,12 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 		return err
 	}
 
+	// Key exclusions belong to the previous channel attempt. A new channel has
+	// its own credential namespace and must make a normal first selection.
+	contexts.ClearChannelAPIKeyRetryExclusions(ctx)
+	contexts.ClearChannelAPIKey(ctx)
+	p.preferAPIKeyRetry = false
+
 	if lifecycleOwner := streamLifecycleFromContext(ctx); lifecycleOwner != nil {
 		lifecycleOwner.waitForAccounting()
 	}
@@ -1071,14 +1078,25 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 		return true
 	}
 
-	// 429 Too Many Requests: always skip same-channel retry.
-	// The upstream is explicitly rate-limiting this channel, so retrying the same
-	// channel would just burn a retry attempt without any chance of success.
-	// Instead, force a channel switch so the next candidate (e.g. a backup channel)
-	// is tried immediately. The load balancer (e.g. ErrorAware strategy) will
-	// deprioritize this channel for subsequent requests and it will naturally
-	// recover as the rate-limit window resets.
-	if httpclient.IsRateLimitErr(err) || ExtractStatusCodeFromError(err) == http.StatusTooManyRequests {
+	statusCode := ExtractStatusCodeFromError(err)
+
+	// Authentication and quota failures often belong to one credential rather
+	// than the whole channel. Rotate to another enabled key first when one is
+	// available; only skip the channel when every credential has been tried.
+	if statusCode == http.StatusUnauthorized || httpclient.IsRateLimitErr(err) || statusCode == http.StatusTooManyRequests {
+		if p.hasAlternativeRetryAPIKey() {
+			p.preferAPIKeyRetry = true
+
+			log.Debug(context.Background(), "credential failure, rotating same-channel API key",
+				log.Int("channel_id", p.state.CurrentCandidate.Channel.ID),
+				log.Int("status_code", statusCode),
+			)
+
+			return true
+		}
+
+		// OAuth-backed channels refresh above the pipeline's same-channel retry
+		// layer. With no static alternative, move directly to the next channel.
 		log.Debug(context.Background(), "429 rate limit, skipping same-channel retry to switch to next channel",
 			log.Int("channel_id", p.state.CurrentCandidate.Channel.ID),
 		)
@@ -1093,6 +1111,47 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 
 	// otherwise check if the error is retryable for the current channel.
 	return isRetryableErrorForChannel(err, p.state.CurrentCandidate.Channel)
+}
+
+// CanFailover reports whether another channel may resolve the failure. It is
+// intentionally broader than same-channel retry: 429 and local admission
+// rejections should move directly to another candidate without replaying the
+// current one.
+func (p *PersistentOutboundTransformer) CanFailover(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isChannelQueueError(err) || isLocalRPMExhaustedError(err) {
+		return true
+	}
+	if errors.Is(err, errSkipCandidateByCircuitBreaker) {
+		return true
+	}
+	if errors.Is(err, pipeline.ErrEmptyResponse) ||
+		errors.Is(err, pipeline.ErrEmptyStreamChunks) ||
+		errors.Is(err, pipeline.ErrEmptyAggregatedBody) ||
+		errors.Is(err, pipeline.ErrStreamFirstEventTimeout) ||
+		errors.Is(err, pipeline.ErrNonStreamResponseTimeout) {
+		return true
+	}
+	if ExtractStatusCodeFromError(err) == http.StatusUnauthorized {
+		return true
+	}
+	if p.state == nil || p.state.CurrentCandidate == nil {
+		return isRetryableError(err)
+	}
+
+	return isRetryableErrorForChannel(err, p.state.CurrentCandidate.Channel)
+}
+
+// RefreshAuth implements pipeline.UnauthorizedRefresher.
+func (p *PersistentOutboundTransformer) RefreshAuth(ctx context.Context) (bool, error) {
+	channel := p.GetCurrentChannel()
+	if channel == nil {
+		return false, nil
+	}
+
+	return channel.RefreshAuth(ctx)
 }
 
 // PrepareForRetry implements the pipeline.ChannelRetryable interface.
@@ -1124,8 +1183,24 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 	// so it exits promptly and releases its upstream HTTP connection.
 	p.resetPassThroughStreamState()
 
+	// A 401/429 is tied to the selected credential. Keep the model fixed and
+	// rotate the key before considering another model alias in this channel.
+	if p.preferAPIKeyRetry {
+		p.preferAPIKeyRetry = false
+		if err := p.excludeCurrentRetryAPIKey(ctx); err != nil {
+			return err
+		}
+		p.trackCurrentChannelSelection()
+
+		return nil
+	}
+
 	// If there's another model in the list, advance to it.
 	if p.state.CurrentModelIndex+1 < len(candidate.Models) {
+		// The key failure belongs to the previous model attempt; do not carry it
+		// into a different model that may route through another key group.
+		contexts.ClearChannelAPIKeyRetryExclusions(ctx)
+
 		// Increase the model index to the next model.
 		p.state.CurrentModelIndex++
 		p.refreshCandidateAPIFormat(ctx, candidate, p.state.CurrentModelIndex, p.state.LlmRequest)
@@ -1146,6 +1221,10 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 		return nil
 	}
 
+	if err := p.excludeCurrentRetryAPIKey(ctx); err != nil {
+		return err
+	}
+
 	p.trackCurrentChannelSelection()
 
 	// Otherwise, we're retrying the current (last) model.
@@ -1161,6 +1240,20 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 	}
 
 	return nil
+}
+
+func (p *PersistentOutboundTransformer) hasAlternativeRetryAPIKey() bool {
+	if p == nil || p.state == nil || p.state.CurrentCandidate == nil || p.state.CurrentCandidate.Channel == nil {
+		return false
+	}
+
+	candidate := p.state.CurrentCandidate
+	model := ""
+	if p.state.CurrentModelIndex >= 0 && p.state.CurrentModelIndex < len(candidate.Models) {
+		model = candidate.Models[p.state.CurrentModelIndex].ActualModel
+	}
+
+	return len(candidate.Channel.GetEnabledAPIKeysForModel(model)) > 1
 }
 
 // CustomizeExecutor customizes the executor for the current channel.

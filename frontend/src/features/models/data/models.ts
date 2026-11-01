@@ -2,8 +2,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { graphqlRequest } from '@/gql/graphql';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
+import { FROZEN_MODEL_CHANNEL_FIELDS, frozenModelChannelsSchema } from './frozen-model-channels';
+import type { FrozenModelChannel } from './frozen-model-channels';
+import { usePermissions } from '@/hooks/usePermissions';
 import { useErrorHandler } from '@/hooks/use-error-handler';
 import { Model, ModelConnection, CreateModelInput, UpdateModelInput, modelConnectionSchema, modelSchema } from './schema';
+
+export type { FrozenModelChannel } from './frozen-model-channels';
 
 const MODELS_QUERY = `
   query GetModels(
@@ -533,6 +538,7 @@ export function useCreateModel() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('models.messages.createSuccess'));
     },
     onError: (error) => {
@@ -553,6 +559,7 @@ export function useBulkCreateModels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('models.messages.bulkCreateSuccess', { count: variables.length }));
     },
     onError: (error) => {
@@ -573,6 +580,7 @@ export function useUpdateModel() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('models.messages.updateSuccess'));
     },
     onError: (error) => {
@@ -592,6 +600,7 @@ export function useDeleteModel() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('models.messages.deleteSuccess'));
     },
     onError: (error) => {
@@ -618,6 +627,7 @@ export function useUpdateModelStatus() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       const statusKey = variables.status === 'archived' ? 'archiveSuccess' : 'restoreSuccess';
       toast.success(t(`models.messages.${statusKey}`));
     },
@@ -645,6 +655,7 @@ export function useBulkDisableModels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('models.messages.bulkDisableSuccess', { count: variables.length }));
     },
   });
@@ -667,6 +678,7 @@ export function useBulkEnableModels() {
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['models'] });
+      queryClient.invalidateQueries({ queryKey: ['frozenModelChannels'] });
       toast.success(t('models.messages.bulkEnableSuccess', { count: variables.length }));
     },
   });
@@ -757,15 +769,6 @@ export interface ModelCooldownEntry {
   expiresAt?: string | null;
 }
 
-export interface FrozenModelChannel {
-  channel: {
-    id: string;
-    name: string;
-    type: string;
-    status: string;
-  };
-  cooldowns: ModelCooldownEntry[];
-}
 export interface ModelChannelConnection {
   channel: {
     id: string;
@@ -782,35 +785,28 @@ export interface ModelChannelConnection {
 const FROZEN_MODEL_CHANNELS_QUERY = `
   query QueryFrozenModelChannels($modelID: String!) {
     queryFrozenModelChannels(modelID: $modelID) {
-      channel {
-        id
-        name
-        type
-        status
-      }
-      cooldowns {
-        model
-        reason
-        createdAt
-        expiresAt
-      }
+      ${FROZEN_MODEL_CHANNEL_FIELDS}
     }
   }
 `;
 
 export function useFrozenModelChannels(modelID: string | undefined, options?: { enabled?: boolean }) {
-  return useQuery({
-    queryKey: ['frozenModelChannels', modelID],
-    queryFn: async () => {
+  const { hasSystemScope, user } = usePermissions();
+  const canRead = hasSystemScope('read_channels');
+  const query = useQuery({
+    queryKey: ['frozenModelChannels', 'detail', user?.id, modelID],
+    queryFn: async ({ signal }) => {
       if (!modelID) return [];
       const data = await graphqlRequest<{ queryFrozenModelChannels: FrozenModelChannel[] }>(FROZEN_MODEL_CHANNELS_QUERY, {
         modelID,
-      });
-      return data.queryFrozenModelChannels;
+      }, undefined, { signal });
+      return frozenModelChannelsSchema.parse(data.queryFrozenModelChannels);
     },
-    enabled: (options?.enabled ?? true) && !!modelID,
+    enabled: canRead && (options?.enabled ?? true) && !!modelID,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
+  return { ...query, data: canRead ? query.data : undefined };
 }
 export function useQueryUnassociatedChannels() {
   return useQuery({

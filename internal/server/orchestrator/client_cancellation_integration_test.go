@@ -363,7 +363,7 @@ func TestClientCancellationCooldown_ProjectFirstOverride(t *testing.T) {
 	// using the override's one-minute duration instead of the global 30.
 	require.NoError(t, env.process(42, "key-1"))
 	frozen := env.waitForModelCooldown(t, before, "gpt-4", 1)
-	require.Contains(t, frozen.ModelCooldowns[0].Reason, "1 cancellations")
+	require.Contains(t, frozen.ModelCooldowns[0].Reason, "1 cancellation")
 	env.requireModelOnlyCandidateSelection(t, channelID)
 }
 
@@ -403,4 +403,78 @@ func TestClientCancellationCooldown_StatusCodeFailuresAreNotCancellations(t *tes
 	require.Equal(t, channel.StatusEnabled, aborted.Status)
 	require.Empty(t, aborted.ModelCooldowns)
 	require.Empty(t, aborted.DisabledAPIKeys)
+}
+
+func TestClientCancellationCooldown_ResponseHeadersWithoutFirstToken(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []*httpclient.StreamEvent
+	}{
+		{name: "headers-only"},
+		{name: "metadata-only", events: []*httpclient.StreamEvent{
+			{Data: []byte(`{"id":"chatcmpl-meta","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A successful DoStream has completed the response-header phase, even
+			// when cancellation prevents the first event/token from arriving.
+			env := newCancellationTestEnv(t, &mockExecutorWithErrorStream{
+				events: tc.events, streamErr: context.Canceled,
+			}, []string{"key-1", "key-2"})
+			env.setPolicy(t, cancellationSwitchAndCooldownPolicy(1, 3))
+			before := env.getChannel(t, env.channelIDs[0])
+			require.ErrorIs(t, env.process(env.project.ID, "key-1"), context.Canceled)
+			frozen := env.waitForModelCooldown(t, before, "gpt-4", 3)
+			require.Contains(t, frozen.ModelCooldowns[0].Reason, "1 cancellation")
+			env.requireModelOnlyCandidateSelection(t, before.ID)
+		})
+	}
+}
+
+func TestClientCancellationCooldown_HeadersFreezeOnExactlyFifthDespiteSuccess(t *testing.T) {
+	headersOnly := &mockExecutorWithErrorStream{streamErr: context.Canceled}
+	env := newCancellationTestEnv(t, headersOnly, []string{"key-1", "key-2"})
+	env.setPolicy(t, cancellationSwitchAndCooldownPolicy(5, 3))
+	before := env.getChannel(t, env.channelIDs[0])
+
+	for i := 1; i <= 5; i++ {
+		// Neither cancellation before DoStream returns headers nor success may
+		// add to, or erase, the eligible cancellation window.
+		env.useExecutor(&mockExecutor{err: context.Canceled})
+		require.ErrorIs(t, env.process(env.project.ID, "key-1"), context.Canceled)
+		env.useExecutor(&mockExecutor{streamEvents: []*httpclient.StreamEvent{
+			{Data: []byte(`{"id":"chatcmpl-ok","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`)},
+			{Data: []byte(`{"id":"chatcmpl-ok","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)},
+		}})
+		require.NoError(t, env.process(env.project.ID, "key-1"))
+
+		env.useExecutor(headersOnly)
+		require.ErrorIs(t, env.process(env.project.ID, []string{"key-1", "key-2"}[i%2]), context.Canceled)
+		if i < 5 {
+			t.Logf("eligible cancellation %d must not freeze; pre-read Close and raw-error must not double record", i)
+			env.requireNoModelCooldown(t, 200*time.Millisecond)
+		}
+	}
+
+	frozen := env.waitForModelCooldown(t, before, "gpt-4", 3)
+	require.Contains(t, frozen.ModelCooldowns[0].Reason, "5 cancellations")
+	env.requireModelOnlyCandidateSelection(t, before.ID)
+}
+
+func TestClientCancellationCooldown_ResponseHeadersDeadlineIsNotClientCancellation(t *testing.T) {
+	env := newCancellationTestEnv(t, &mockExecutorWithErrorStream{streamErr: context.DeadlineExceeded}, []string{"key-1"})
+	env.setPolicy(t, cancellationSwitchAndCooldownPolicy(1, 3))
+	require.Error(t, env.process(env.project.ID, "key-1"))
+	env.requireNoModelCooldown(t, 200*time.Millisecond)
+}
+
+// Poll on the test goroutine so no condition can outlive database cleanup.
+func (e *cancellationTestEnv) requireNoModelCooldown(t *testing.T, duration time.Duration) {
+	t.Helper()
+	for until := time.Now().Add(duration); time.Now().Before(until); {
+		for _, id := range e.channelIDs {
+			require.Empty(t, e.getChannel(t, id).ModelCooldowns)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

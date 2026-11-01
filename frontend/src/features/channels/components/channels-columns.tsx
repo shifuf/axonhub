@@ -55,6 +55,7 @@ import { ChannelHealthCell } from './channel-health-cell';
 import { ChannelLimiterCell } from './channel-limiter-cell';
 import { ChannelsStatusDialog } from './channels-status-dialog';
 import { CooldownDetails, useCooldownNow } from './cooldown-details';
+import { ModelFreezeBadges } from './model-freeze-badges';
 import { ChatProtocolIcon, MessagesProtocolIcon, ResponsesProtocolIcon } from './endpoint-protocol-icons';
 import { RELAY_PROTOCOLS, RELAY_PROTOCOL_LABEL_KEYS, getChannelRelayProtocols, type RelayProtocol } from '../data/relay-protocols';
 
@@ -444,8 +445,10 @@ function getCooldownRemainingMinutes(channel: Channel, now = Date.now()): number
 const NameCell = memo(({ row, globalDefaultMode }: { row: Row<Channel>; globalDefaultMode?: QuotaRoutingMode }) => {
   const { t } = useTranslation();
   const channel = row.original;
+  const { hasSystemScope } = usePermissions();
+  const modelCooldowns = hasSystemScope('read_channels') ? (channel.modelCooldowns ?? []) : [];
   const hasError = channel.errorMessage != null;
-  const now = useCooldownNow(channel.status === 'disabled');
+  const now = useCooldownNow(channel.status === 'disabled' || modelCooldowns.length > 0);
   const cooldownMinutes = getCooldownRemainingMinutes(channel, now);
   const isCoolingDown = cooldownMinutes > 0;
   // The backend marks a client-cancellation cooldown with a dedicated reason so
@@ -511,11 +514,7 @@ const NameCell = memo(({ row, globalDefaultMode }: { row: Row<Channel>; globalDe
     </div>
   );
 
-  if (!hasError && !hasDisabledKeys && !quotaRoutingIndicator && !isCoolingDown && channel.status !== 'disabled') {
-    return content;
-  }
-
-  return (
+  const nameWithDetails = !hasError && !hasDisabledKeys && !quotaRoutingIndicator && !isCoolingDown && channel.status !== 'disabled' ? content : (
     <Tooltip>
       <TooltipTrigger asChild>{content}</TooltipTrigger>
       <TooltipContent>
@@ -546,6 +545,13 @@ const NameCell = memo(({ row, globalDefaultMode }: { row: Row<Channel>; globalDe
         </div>
       </TooltipContent>
     </Tooltip>
+  );
+
+  return (
+    <div className='flex max-w-64 flex-col items-start gap-1'>
+      {nameWithDetails}
+      <ModelFreezeBadges cooldowns={modelCooldowns} now={now} />
+    </div>
   );
 });
 

@@ -61,15 +61,15 @@ server:
 	}
 }
 
-func TestSSEKeepAliveDefaultsToDisabled(t *testing.T) {
+func TestSSEKeepAliveDefaultsToEnabled(t *testing.T) {
 	configFile := writeTestConfig(t, "")
 
 	cfg, _, err := loadConfig(configFile)
 	if err != nil {
 		t.Fatalf("loadConfig() error = %v", err)
 	}
-	if cfg.APIServer.SSEKeepAlive.Enabled {
-		t.Fatal("SSE keep-alive should default to disabled")
+	if !cfg.APIServer.SSEKeepAlive.Enabled {
+		t.Fatal("SSE keep-alive should default to enabled")
 	}
 	if cfg.APIServer.SSEKeepAlive.Interval != 15*time.Second {
 		t.Fatalf("SSE keep-alive interval = %s, want 15s", cfg.APIServer.SSEKeepAlive.Interval)
@@ -218,5 +218,27 @@ func TestSafeguardsEscalationYAML(t *testing.T) {
 	}
 	if !cfg.APIServer.Safeguards.EscalateOnDenial {
 		t.Fatal("YAML escalation toggle ignored")
+	}
+}
+
+func TestLLMRequestTimeoutDefaultsToUnlimited(t *testing.T) {
+	cfg, _, err := loadConfig(writeTestConfig(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIServer.LLMRequestTimeout != 0 {
+		t.Fatalf("LLM timeout=%v, want 0", cfg.APIServer.LLMRequestTimeout)
+	}
+	if cfg.APIServer.RequestTimeout != 30*time.Second {
+		t.Fatal("admin request timeout must stay bounded")
+	}
+}
+func TestExplicitStreamWaitConfigIsPreserved(t *testing.T) {
+	cfg, _, err := loadConfig(writeTestConfig(t, "server:\n  llm_request_timeout: 120s\n  sse_keep_alive:\n    enabled: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIServer.LLMRequestTimeout != 120*time.Second || cfg.APIServer.SSEKeepAlive.Enabled {
+		t.Fatal("explicit settings must override defaults")
 	}
 }

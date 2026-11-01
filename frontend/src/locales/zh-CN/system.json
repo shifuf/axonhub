@@ -206,7 +206,7 @@
   "system.retry.autoDisableChannel.webhook.body": "请求体模板",
   "system.retry.autoDisableChannel.webhook.templateHelp": "可用模板变量：{{.Event}}、{{.OccurredAt}}、{{.Channel.ID}}、{{.Channel.Name}}、{{.Channel.Provider}}、{{.Channel.Status}}、{{.Trigger.StatusCode}}、{{.Trigger.Threshold}}、{{.Trigger.ActualCount}}、{{.Trigger.Reason}}。",
   "system.retry.clientCancellation.label": "客户端取消冷却",
-  "system.retry.clientCancellation.description": "仅满足上游证据门槛的客户端取消才计入此独立的模型冷却策略，不计入真实错误计数，也不参与永久模型冻结保护。",
+  "system.retry.clientCancellation.description": "收到上游响应头或数据后的客户端取消计入此独立的模型冷却策略，不要求收到首个 Token；未收到上游响应的取消不计数。本地网关心跳不属于上游响应证据。仅冷冻「渠道 × 原始请求模型」，其他模型和 API Key 保持启用。这些取消不计入真实错误计数，也不参与永久模型冻结保护。",
   "system.retry.clientCancellation.globalTitle": "全局设置",
   "system.retry.clientCancellation.threshold.label": "取消阈值",
   "system.retry.clientCancellation.threshold.description": "满足证据门槛的取消达到此次数后触发模型冷却。",

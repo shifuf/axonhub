@@ -153,7 +153,6 @@ func TestChannelService_ClientCancellationEligibilityDoesNotCreateCounters(t *te
 		name string
 		edit func(*PerformanceRecord)
 	}{
-		{name: "nonstream-abort", edit: func(p *PerformanceRecord) { p.Stream = false }},
 		{name: "no-first-token", edit: func(p *PerformanceRecord) { p.FirstTokenTime = nil }},
 		{name: "not-canceled", edit: func(p *PerformanceRecord) { p.Canceled = false }},
 		{name: "missing-model", edit: func(p *PerformanceRecord) { p.Model = "" }},
@@ -311,7 +310,7 @@ func TestChannelService_ClientCancellationCooldownPreservesWindowAndActiveExpiry
 	require.Empty(t, svc.cancellationActionsInFlight)
 	require.Len(t, svc.cancellationWindow[ch.ID], 1)
 	for key, timestamps := range svc.cancellationWindow[ch.ID] {
-		require.Len(t, timestamps, 2, "retain only the latest threshold samples, not an unbounded burst")
+		require.Len(t, timestamps, 18, "retain every in-window sample so raising the threshold does not lose evidence")
 		require.NotContains(t, key, "key1")
 		require.NotContains(t, key, "key2")
 	}
@@ -379,13 +378,13 @@ func TestChannelService_ClientCancellationConcurrentKeysShareOneModelWindow(t *t
 	require.Empty(t, svc.cancellationActionsInFlight)
 	require.Len(t, svc.cancellationWindow[ch.ID], 1)
 	for key, timestamps := range svc.cancellationWindow[ch.ID] {
-		require.Len(t, timestamps, 2)
+		require.Len(t, timestamps, 12)
 		require.False(t, strings.Contains(key, "key1") || strings.Contains(key, "key2"))
 		require.True(t, slices.IsSortedFunc(timestamps, time.Time.Compare))
 	}
 }
 
-func TestChannelService_ClientCancellationNonstreamAndPreTokenAbortsAreNotFailures(t *testing.T) {
+func TestChannelService_ClientCancellationWithoutUpstreamEvidenceIsNotFailure(t *testing.T) {
 	client, ctx, svc := cancellationTestEnvironment(t)
 	ch := createTestChannelWithAPIKeys(t, client, ctx, "abort-not-failure", []string{"key1"})
 	withClientCancellationPolicy(t, svc, ctx, ch, ClientCancellationPolicy{
@@ -407,9 +406,9 @@ func TestChannelService_ClientCancellationNonstreamAndPreTokenAbortsAreNotFailur
 		perf := canceledPerf(ch.ID, 7, "key1")
 		if i%2 == 0 {
 			perf.Stream = false
-		} else {
-			perf.FirstTokenTime = nil
 		}
+		perf.FirstTokenTime = nil
+		perf.UpstreamResponseReceived = false
 		perf.ResponseStatusCode = 500
 		svc.RecordPerformance(ctx, perf)
 	}
@@ -422,4 +421,122 @@ func TestChannelService_ClientCancellationNonstreamAndPreTokenAbortsAreNotFailur
 	metrics := svc.channelPerfMetrics[ch.ID].aggregatedMetrics
 	require.Zero(t, metrics.FailureCount)
 	require.Zero(t, metrics.ConsecutiveFailures)
+}
+
+func TestChannelService_ClientCancellationUpstreamEvidenceEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stream     bool
+		response   bool
+		firstToken bool
+		eligible   bool
+	}{
+		{name: "response-headers-only", stream: true, response: true, eligible: true},
+		{name: "legacy-first-token", stream: true, firstToken: true, eligible: true},
+		{name: "headers-and-token-count-once", stream: true, response: true, firstToken: true, eligible: true},
+		{name: "before-response", stream: true},
+		{name: "nonstream-with-response", response: true, eligible: true},
+		{name: "nonstream-with-token", firstToken: true, eligible: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, ctx, svc := cancellationTestEnvironment(t)
+			ch := createTestChannelWithAPIKeys(t, client, ctx, tc.name, []string{"key1"})
+			withClientCancellationPolicy(t, svc, ctx, ch, ClientCancellationPolicy{
+				Enabled: true, Threshold: 5, WindowMinutes: 10, CooldownMinutes: 3,
+			})
+			perf := canceledPerf(ch.ID, 7, "key1")
+			perf.Stream = tc.stream
+			perf.UpstreamResponseReceived = tc.response
+			if !tc.firstToken {
+				perf.FirstTokenTime = nil
+			}
+			svc.RecordPerformance(ctx, perf)
+			if tc.eligible {
+				require.Len(t, svc.cancellationWindow[ch.ID], 1)
+				for _, timestamps := range svc.cancellationWindow[ch.ID] {
+					require.Len(t, timestamps, 1)
+				}
+			} else {
+				require.Empty(t, svc.cancellationWindow)
+			}
+			require.Zero(t, svc.channelPerfMetrics[ch.ID].aggregatedMetrics.FailureCount)
+		})
+	}
+}
+
+func TestChannelService_ClientCancellationHeadersExactFifthPreservesWindow(t *testing.T) {
+	client, ctx, svc := cancellationTestEnvironment(t)
+	ch := createTestChannelWithAPIKeys(t, client, ctx, "headers-fifth", []string{"key1", "key2"})
+	other := createTestChannelWithAPIKeys(t, client, ctx, "headers-other", []string{"key1"})
+	withClientCancellationPolicy(t, svc, ctx, ch, ClientCancellationPolicy{
+		Enabled: true, Threshold: 5, WindowMinutes: 10, CooldownMinutes: 3,
+	})
+	svc.SetEnabledChannelsForTest([]*Channel{buildChannel(ch, nil), buildChannel(other, nil)})
+	recordCancellation := func(channelID, projectID int, model, key string) {
+		perf := canceledPerf(channelID, projectID, key)
+		perf.Model = model
+		perf.FirstTokenTime = nil
+		perf.UpstreamResponseReceived = true
+		svc.RecordPerformance(ctx, perf)
+	}
+	// Other models, channels and projects must not help this pair reach five.
+	recordCancellation(ch.ID, 7, "gpt-4o", "key1")
+	recordCancellation(other.ID, 7, "gpt-4", "key1")
+	recordCancellation(ch.ID, 8, "gpt-4", "key1")
+	key := fmt.Sprintf("%s:project:7:window:10", cancellationCounterIdentity(&PerformanceRecord{Model: "gpt-4"}))
+	for i := 1; i <= 5; i++ {
+		recordCancellation(ch.ID, 7, "gpt-4", []string{"key1", "key2"}[i%2])
+		require.Len(t, svc.cancellationWindow[ch.ID][key], i)
+		success := &PerformanceRecord{ChannelID: ch.ID, ProjectID: 7, Model: "gpt-4", APIKey: "key1"}
+		success.MarkSuccess()
+		svc.RecordPerformance(ctx, success)
+		require.Len(t, svc.cancellationWindow[ch.ID][key], i, "success must preserve active evidence")
+		updated, err := client.Channel.Get(ctx, ch.ID)
+		require.NoError(t, err)
+		requireCancellationChannelUnchanged(t, ch, updated)
+		if i < 5 {
+			require.Empty(t, updated.ModelCooldowns)
+		} else {
+			require.Len(t, updated.ModelCooldowns, 1)
+			require.Equal(t, "gpt-4", updated.ModelCooldowns[0].Model)
+			require.Contains(t, updated.ModelCooldowns[0].Reason, "5 cancellations")
+			require.True(t, updated.ModelCooldowns[0].IsActive())
+		}
+	}
+	untouched, err := client.Channel.Get(ctx, other.ID)
+	require.NoError(t, err)
+	requireCancellationChannelUnchanged(t, other, untouched)
+	require.Empty(t, untouched.ModelCooldowns)
+}
+
+func TestChannelService_AsyncRecordPerformanceQueuesEachAttemptOnce(t *testing.T) {
+	ctx := context.Background()
+	svc := &ChannelService{perfCh: make(chan *PerformanceRecord, 64)}
+	perf := &PerformanceRecord{ChannelID: 1, Model: "gpt-4", Stream: true, UpstreamResponseReceived: true}
+	perf.MarkCanceled()
+
+	// Raw-error handling and deferred accounting can finish the same attempt.
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Errorf("async recording panicked: %v", recovered)
+				}
+			}()
+			svc.AsyncRecordPerformance(ctx, perf)
+		}()
+	}
+	wg.Wait()
+	require.Len(t, svc.perfCh, 1, "one cancellation must not contribute multiple samples")
+	require.Same(t, perf, <-svc.perfCh)
+
+	// Identical values in a different attempt remain independent evidence.
+	nextAttempt := &PerformanceRecord{ChannelID: 1, Model: "gpt-4", Stream: true, UpstreamResponseReceived: true}
+	nextAttempt.MarkCanceled()
+	svc.AsyncRecordPerformance(ctx, nextAttempt)
+	require.Len(t, svc.perfCh, 1)
+	require.Same(t, nextAttempt, <-svc.perfCh)
 }

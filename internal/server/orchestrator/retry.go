@@ -81,14 +81,14 @@ func ExtractStatusCodeFromError(err error) int {
 		return 0
 	}
 
-	var httpErr *httpclient.Error
-	if errors.As(err, &httpErr) {
-		return httpErr.StatusCode
-	}
-
 	var llmErr *llm.ResponseError
 	if errors.As(err, &llmErr) {
 		return llmErr.StatusCode
+	}
+
+	var httpErr *httpclient.Error
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode
 	}
 
 	return 0

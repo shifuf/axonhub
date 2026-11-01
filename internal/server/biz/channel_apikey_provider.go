@@ -4,6 +4,7 @@ import (
 	"context"
 	"hash/fnv"
 	"math/rand/v2"
+	"slices"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
@@ -55,7 +56,19 @@ func NewTraceStickyKeyProvider(channel *Channel) *TraceStickyKeyProvider {
 }
 
 func (p *TraceStickyKeyProvider) Get(ctx context.Context) string {
-	enabled := p.channel.enabledAPIKeysForRequest(ctx)
+	enabled := p.channel.EnabledAPIKeysForRequest(ctx)
+	excluded := contexts.GetChannelAPIKeyRetryExclusions(ctx, p.channel.ID)
+	if len(excluded) > 0 {
+		eligible := make([]string, 0, len(enabled))
+		for _, key := range enabled {
+			if _, skip := excluded[key]; !skip {
+				eligible = append(eligible, key)
+			}
+		}
+		if len(eligible) > 0 {
+			enabled = eligible
+		}
+	}
 	if len(enabled) == 0 {
 		// Nothing enabled is left for this request. Fall back to the first
 		// configured key so the channel is not selected with no credential at
@@ -76,7 +89,7 @@ func (p *TraceStickyKeyProvider) Get(ctx context.Context) string {
 	var selectedKey string
 
 	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil {
-		if cached, ok := p.cache.Get(trace.TraceID); ok {
+		if cached, ok := p.cache.Get(trace.TraceID); ok && slices.Contains(enabled, cached) {
 			selectedKey = cached
 		} else {
 			selectedKey = rendezvousSelect(enabled, trace.TraceID)

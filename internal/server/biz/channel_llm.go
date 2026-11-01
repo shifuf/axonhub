@@ -75,6 +75,24 @@ func setupAutoRefresh(ch *Channel, refresher AutoRefresher, opts oauth.AutoRefre
 		refresher.StartAutoRefresh(context.Background(), opts)
 	}
 	ch.stopTokenProvider = refresher.StopAutoRefresh
+	if forceRefresher, ok := refresher.(interface {
+		ForceRefresh(context.Context) (*oauth.OAuthCredentials, error)
+	}); ok {
+		ch.refreshToken = func(ctx context.Context) error {
+			_, err := forceRefresher.ForceRefresh(ctx)
+			return err
+		}
+	}
+}
+
+// RefreshAuth forces an OAuth/session credential refresh for a 401 replay.
+// Static API-key channels deliberately report no refresh capability.
+func (c *Channel) RefreshAuth(ctx context.Context) (bool, error) {
+	if c == nil || c.refreshToken == nil {
+		return false, nil
+	}
+
+	return true, c.refreshToken(ctx)
 }
 
 func (c *Channel) IsModelSupported(model string) bool {

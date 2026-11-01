@@ -258,6 +258,27 @@ func TestReadHTTPRequest_EmptyBody(t *testing.T) {
 	assert.Empty(t, got.Body)
 }
 
+func TestIsHTTPStatusCodeRetryable(t *testing.T) {
+	tests := []struct {
+		status int
+		want   bool
+	}{
+		{status: http.StatusRequestTimeout, want: true},
+		{status: http.StatusTooManyRequests, want: true},
+		{status: http.StatusInternalServerError, want: true},
+		{status: http.StatusBadGateway, want: true},
+		{status: http.StatusGatewayTimeout, want: true},
+		{status: http.StatusBadRequest, want: false},
+		{status: http.StatusUnauthorized, want: false},
+		{status: http.StatusNotFound, want: false},
+		{status: http.StatusOK, want: false},
+	}
+
+	for _, tt := range tests {
+		require.Equal(t, tt.want, IsHTTPStatusCodeRetryable(tt.status), "status %d", tt.status)
+	}
+}
+
 func TestReadHTTPRequest_EmptyBodyWithContentEncoding(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("Content-Type", "application/json")

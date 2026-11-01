@@ -82,3 +82,16 @@ func TestQueryModels_ProjectAPIKeyManagerCanReadModels(t *testing.T) {
 	_, err = resolver.QueryModels(ctxWithoutProject, QueryModelsInput{})
 	require.Error(t, err)
 }
+
+func TestQueryFrozenModelChannelsRequiresReadChannelsScope(t *testing.T) {
+	client := enttest.NewEntClient(t, "sqlite3", "file:query-frozen-model-authz?mode=memory&_fk=1")
+	defer client.Close()
+
+	ctx := ent.NewContext(t.Context(), client)
+	ctx = authz.NewUserContext(ctx, 1)
+	ctx = contexts.WithUser(ctx, &ent.User{ID: 1})
+
+	resolver := &queryResolver{&Resolver{}}
+	_, err := resolver.QueryFrozenModelChannels(ctx, "gpt-4")
+	require.ErrorContains(t, err, "required scope read_channels")
+}

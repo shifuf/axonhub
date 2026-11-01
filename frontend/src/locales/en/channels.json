@@ -1,4 +1,5 @@
 {
+  "channels.cooldown.modelFrozen": "{{model}} model frozen",
   "copilot_device.copy_code": "Copy code",
   "copilot_device.step_1": "Click the button above to open GitHub",
   "copilot_device.step_2": "Enter the code shown above",

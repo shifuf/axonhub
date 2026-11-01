@@ -99,25 +99,47 @@ func (handlers *ChatCompletionHandlers) ChatCompletionWithRequest(c *gin.Context
 	}
 	genericReq = prepared
 
-	processCtx := ctx
-	var abortUpstream context.CancelFunc
-	if evaluator != nil {
-		processCtx, abortUpstream = context.WithCancel(ctx)
-		defer abortUpstream()
-	}
-	result, err := handlers.ChatCompletionOrchestrator.Process(processCtx, genericReq)
+	processCtx, abortUpstream := newChatProcessingContext(c)
+	defer abortUpstream()
+
+	var preparedStream streams.Stream[*httpclient.StreamEvent]
+	primedHeaders := make(http.Header)
+	result, err := handlers.awaitChatCompletion(c, genericReq, abortUpstream, func() (orchestrator.ChatCompletionResult, error) {
+		result, err := handlers.ChatCompletionOrchestrator.Process(processCtx, genericReq)
+		if err == nil && result.ChatCompletionStream != nil {
+			preparedStream = prepareChatStream(processCtx, result.ChatCompletionStream, abortUpstream, func(raw streams.Stream[*httpclient.StreamEvent]) streams.Stream[*httpclient.StreamEvent] {
+				source := wrapSafeguardsStream(processCtx, raw, evaluator, abortUpstream)
+				stream := newUpstreamErrorStream(processCtx, source, handlers.ChatCompletionOrchestrator.SystemService)
+				if strings.HasSuffix(genericReq.Path, "/responses") {
+					stream = primeCodexTurnStateHeader(primedHeaders, stream)
+				}
+				return stream
+			})
+		}
+
+		return result, err
+	})
 	if err != nil {
 		log.Error(ctx, "Error processing chat completion", log.Cause(err))
-
-		httpErr := transformOrchestratorError(ctx, err, handlers.ChatCompletionOrchestrator)
-		c.JSON(httpErr.StatusCode, json.RawMessage(httpErr.Body))
-
+		if c.Writer.Written() {
+			handlers.writeStartedChatError(c, err)
+		} else if !errors.Is(ctx.Err(), context.Canceled) {
+			httpErr := transformOrchestratorError(ctx, err, handlers.ChatCompletionOrchestrator)
+			c.JSON(httpErr.StatusCode, json.RawMessage(httpErr.Body))
+		}
 		return
+	}
+	if !c.Writer.Written() {
+		copyCodexTurnStateHeader(c.Writer.Header(), primedHeaders)
 	}
 
 	writeForwardResponseHeaders(c, genericReq, result)
 
 	if result.ChatCompletion != nil {
+		if c.Writer.Written() {
+			handlers.writeStartedChatError(c, errors.New("upstream returned a non-streaming response after SSE started"))
+			return
+		}
 		resp := result.ChatCompletion
 		copyCodexTurnStateHeader(c.Writer.Header(), resp.Headers)
 
@@ -137,25 +159,11 @@ func (handlers *ChatCompletionHandlers) ChatCompletionWithRequest(c *gin.Context
 	}
 
 	if result.ChatCompletionStream != nil {
-		defer func() {
-			log.Debug(ctx, "Close chat stream")
-
-			err := result.ChatCompletionStream.Close()
-			if waiter, ok := result.ChatCompletionStream.(streams.FinalizationWaiter); ok {
-				waiter.WaitForFinalization()
-			}
-			if err != nil {
-				logger.Error(ctx, "Error closing stream", log.Cause(err))
-			}
-		}()
+		defer closeChatCompletionStream(ctx, result.ChatCompletionStream)
 
 		c.Header("Access-Control-Allow-Origin", "*")
+		stream := preparedStream
 
-		source := wrapSafeguardsStream(ctx, result.ChatCompletionStream, evaluator, abortUpstream)
-		stream := newUpstreamErrorStream(ctx, source, handlers.ChatCompletionOrchestrator.SystemService)
-		if strings.HasSuffix(genericReq.Path, "/responses") {
-			stream = primeCodexTurnStateHeader(c.Writer.Header(), stream)
-		}
 		if handlers.StreamWriter != nil {
 			handlers.StreamWriter(c, stream)
 			return
@@ -296,6 +304,7 @@ func writeSSEStreamWithoutHeartbeat(c *gin.Context, stream streams.Stream[*httpc
 	defer func() {
 		clearSSEWriteDeadline(ctx, c.Writer)
 		if clientDisconnected {
+			abortChatStream(ctx)
 			log.Warn(ctx, "Client disconnected")
 		}
 	}()
@@ -387,6 +396,7 @@ func writeEncodedSSEStreamWithHeartbeat(
 	defer func() {
 		clearSSEWriteDeadline(ctx, c.Writer)
 		if clientDisconnected {
+			abortChatStream(ctx)
 			log.Warn(ctx, "Client disconnected")
 		}
 	}()
@@ -402,7 +412,12 @@ func writeEncodedSSEStreamWithHeartbeat(
 	reader := newSSEStreamReader(ctx, stream)
 	// The caller closes the stream after this function returns. Wait for the
 	// reader first so Close cannot race with Next or Current.
-	defer reader.Stop()
+	defer func() {
+		if clientDisconnected {
+			abortChatStream(ctx)
+		}
+		reader.Stop()
+	}()
 
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -512,13 +527,27 @@ func writeSSEStreamEnd(
 			log.Warn(ctx, "Failed to write SSE deadline error", log.Cause(err))
 		}
 	case streamErr != nil:
-		if errors.Is(streamErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		if errors.Is(ctx.Err(), context.Canceled) {
 			*clientDisconnected = true
 
 			if !errors.Is(streamErr, context.Canceled) {
 				log.Warn(ctx, "Stream error after client disconnected", log.Cause(streamErr))
 			}
 		} else {
+			if errors.Is(streamErr, context.Canceled) {
+				// A canceled upstream/execution context is not proof that the
+				// downstream client disconnected. Do not silently truncate a
+				// still-connected client or falsely log "Client disconnected".
+				streamErr = &llm.ResponseError{
+					StatusCode: http.StatusBadGateway,
+					Detail: llm.ErrorDetail{
+						Type:    "server_error",
+						Code:    "stream_processing_canceled",
+						Message: "Stream processing was canceled before completion while the client connection remained active.",
+					},
+					Cause: streamErr,
+				}
+			}
 			log.Error(ctx, "Error in stream", log.Cause(streamErr))
 			if err := writeSSEErrorEvent(ctx, c.Writer, formatErr, streamErr); err != nil {
 				*clientDisconnected = true
@@ -678,6 +707,7 @@ func setSSEHeaders(c *gin.Context) {
 func setSSEResponseHeaders(header http.Header) {
 	header.Set("Content-Type", sse.ContentType)
 	header.Set("Cache-Control", "no-cache")
+	header.Set("X-Accel-Buffering", "no")
 	header.Set("Connection", "keep-alive")
 }
 
@@ -715,6 +745,7 @@ func WriteBinaryStream(c *gin.Context, stream streams.Stream[*httpclient.StreamE
 
 	defer func() {
 		if clientDisconnected {
+			abortChatStream(ctx)
 			log.Warn(ctx, "Client disconnected")
 		}
 	}()

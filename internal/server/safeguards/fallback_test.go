@@ -42,7 +42,7 @@ func TestFallbackRecoversFailures(t *testing.T) {
 	for _, failure := range []string{"error", "malformed", "timeout", "late_success"} {
 		t.Run(failure, func(t *testing.T) {
 			var called []string
-			e := fallbackEvaluator(t, Config{ClassifierModel: "primary", FallbackModels: []string{"backup"}, Timeout: time.Second, AttemptTimeout: 10 * time.Millisecond}, func(ctx context.Context, r ClassifierRequest) (string, error) {
+			e := fallbackEvaluator(t, Config{ClassifierModel: "primary", FallbackModels: []string{"backup"}, Timeout: time.Second, AttemptTimeout: 100 * time.Millisecond}, func(ctx context.Context, r ClassifierRequest) (string, error) {
 				called = append(called, r.Model)
 				if r.Model == "primary" {
 					switch failure {

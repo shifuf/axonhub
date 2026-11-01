@@ -397,6 +397,68 @@ func (p *DeviceFlowProvider) getAccessTokenWithRefresh(ctx context.Context) (str
 	}
 }
 
+// ForceRefresh refreshes credentials even when the access token still looks
+// unexpired. This covers upstream 401s that invalidate a token early.
+func (p *DeviceFlowProvider) ForceRefresh(ctx context.Context) (*OAuthCredentials, error) {
+	for {
+		v, err, _ := p.sf.Do("refresh", func() (any, error) {
+			p.mu.RLock()
+			current := p.creds
+			onRefreshed := p.onRefreshed
+			p.mu.RUnlock()
+
+			if current == nil {
+				return nil, errors.New("credentials is nil")
+			}
+			if current.RefreshToken == "" {
+				return nil, errors.New("refresh_token is empty")
+			}
+
+			fresh, err := p.refresh(ctx, current)
+			if err != nil {
+				return nil, err
+			}
+
+			retryExpired := false
+			if onRefreshed != nil {
+				if err := onRefreshed(ctx, fresh); err != nil {
+					var conflict *CredentialConflictError
+					if errors.As(err, &conflict) {
+						fresh = conflict.Credentials
+						retryExpired = fresh != nil
+					} else {
+						return nil, fmt.Errorf("failed to persist forced device-flow refresh: %w", err)
+					}
+				}
+			}
+
+			p.UpdateCredentials(fresh)
+			if fresh == nil {
+				p.StopAutoRefresh()
+				return nil, errors.New("credentials is nil")
+			}
+
+			return refreshResult{credentials: fresh, retryExpired: retryExpired}, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		result, ok := v.(refreshResult)
+		if !ok {
+			return nil, fmt.Errorf("singleflight returned unexpected type %T", v)
+		}
+		if result.retryExpired && result.credentials.RefreshToken != "" && result.credentials.IsExpired(time.Now()) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		return result.credentials, nil
+	}
+}
+
 // GetCredentials returns a copy of the current OAuth credentials.
 // Returns nil if no credentials are stored.
 func (p *DeviceFlowProvider) GetCredentials() *OAuthCredentials {

@@ -56,6 +56,12 @@ func (p *CopilotTokenProvider) GetToken(ctx context.Context) (string, error) {
 	return p.deviceFlowProvider.GetToken(ctx)
 }
 
+// ForceRefresh refreshes the underlying GitHub OAuth credentials after an
+// upstream 401 invalidates an otherwise unexpired access token.
+func (p *CopilotTokenProvider) ForceRefresh(ctx context.Context) (*oauth.OAuthCredentials, error) {
+	return p.deviceFlowProvider.ForceRefresh(ctx)
+}
+
 // UpdateCredentials updates the stored OAuth credentials.
 // This is called when new credentials are obtained (e.g., after device flow completes).
 // Delegates to the underlying DeviceFlowProvider.

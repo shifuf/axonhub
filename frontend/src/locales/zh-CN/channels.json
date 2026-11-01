@@ -1,4 +1,5 @@
 {
+  "channels.cooldown.modelFrozen": "{{model}} 模型已冷冻",
   "copilot_device.copy_code": "复制代码",
   "copilot_device.step_1": "点击上方按钮打开 GitHub",
   "copilot_device.step_2": "输入上方的代码",

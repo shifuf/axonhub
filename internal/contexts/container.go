@@ -29,6 +29,10 @@ type contextContainer struct {
 	// set right before the outbound transform so a channel's API key provider can
 	// pick a key whose model allowlist matches the request.
 	RequestModel *string
+
+	// ChannelAPIKeyRetryExclusions records keys that failed during this logical
+	// request and must not be selected again by a same-channel retry.
+	ChannelAPIKeyRetryExclusions map[int]map[string]struct{}
 }
 
 // getContainer retrieves the existing container from context, or creates a new one and stores it in the context if it doesn't exist.

@@ -182,6 +182,7 @@ func newStreamLifecycle(ctx context.Context) (*streamLifecycle, context.Context)
 }
 
 func (s *streamLifecycle) watch() {
+	defer close(s.done)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			log.Warn(s.execution, "stream lifecycle watcher panicked", log.Any("panic", recovered))
@@ -189,12 +190,21 @@ func (s *streamLifecycle) watch() {
 	}()
 	select {
 	case <-s.downstream.Done():
+		if errors.Is(s.downstream.Err(), context.DeadlineExceeded) {
+			if _, inherited := s.execution.Deadline(); inherited {
+				// The execution has the same deadline, but its timer may not
+				// have run yet. Calling CancelCauseFunc first permanently sets
+				// Err() to Canceled (even with a DeadlineExceeded cause), which
+				// misclassifies gateway timeouts as client cancellations. Let
+				// the already-due inherited deadline win before cleanup.
+				<-s.execution.Done()
+			}
+		}
 		s.downstreamEnded(s.downstream.Err())
 	case <-s.shutdownDone():
 		s.downstreamEnded(context.Cause(s.shutdown))
 	case <-s.stopWatch:
 	}
-	close(s.done)
 }
 
 func (s *streamLifecycle) shutdownDone() <-chan struct{} {
@@ -324,11 +334,25 @@ func (s *streamLifecycle) Close() {
 	s.closed = true
 	acknowledged := s.acknowledged
 	tail := s.tail
+	waitForInheritedDeadline := false
+	if !s.canceled && errors.Is(s.downstream.Err(), context.DeadlineExceeded) {
+		if _, inherited := s.execution.Deadline(); inherited {
+			// Close can win the race against the execution context's timer.
+			// Canceling with a cause here would permanently report
+			// context.Canceled even though the inherited deadline already fired.
+			// Let the execution timer win instead.
+			s.canceled = true
+			waitForInheritedDeadline = true
+		}
+	}
 	if !s.canceled && (!acknowledged || tail == nil) {
 		s.canceled = true
 		s.cancel(context.Canceled)
 	}
 	s.mu.Unlock()
+	if waitForInheritedDeadline {
+		<-s.execution.Done()
+	}
 	if tail != nil && acknowledged {
 		s.startTail(tail, nil)
 		<-tail.done

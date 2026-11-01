@@ -60,6 +60,9 @@ type mockOutbound struct {
 	transformer.Outbound
 
 	apiFormat             llm.APIFormat
+	retrySafe             func() bool
+	refreshAuth           func(context.Context) (bool, error)
+	canFailover           func(error) bool
 	hasMoreChannels       func() bool
 	nextChannel           func(context.Context) error
 	canRetry              func(error) bool
@@ -72,6 +75,31 @@ type mockOutbound struct {
 }
 
 func (m *mockOutbound) APIFormat() llm.APIFormat { return m.apiFormat }
+
+func (m *mockOutbound) RetrySafe() bool {
+	if m.retrySafe != nil {
+		return m.retrySafe()
+	}
+
+	return true
+}
+
+func (m *mockOutbound) RefreshAuth(ctx context.Context) (bool, error) {
+	if m.refreshAuth != nil {
+		return m.refreshAuth(ctx)
+	}
+
+	return false, nil
+}
+
+func (m *mockOutbound) CanFailover(err error) bool {
+	if m.canFailover != nil {
+		return m.canFailover(err)
+	}
+
+	return true
+}
+
 func (m *mockOutbound) TransformRequest(ctx context.Context, req *llm.Request) (*httpclient.Request, error) {
 	if m.transformRequest != nil {
 		return m.transformRequest(ctx, req)
@@ -234,6 +262,240 @@ func (m *mockMiddleware) OnOutboundLlmStream(ctx context.Context, stream streams
 func TestPipeline_Process_RetryLogic(t *testing.T) {
 	ctx := context.Background()
 	inbound := &mockInbound{}
+
+	t.Run("UnsafeRequestBlocksSameChannelRetry", func(t *testing.T) {
+		execCalls := 0
+		executor := &mockExecutor{
+			do: func(ctx context.Context, req *httpclient.Request) (*httpclient.Response, error) {
+				execCalls++
+				return nil, errors.New("temporary error")
+			},
+		}
+
+		prepareCalls := 0
+		outbound := &mockOutbound{
+			retrySafe: func() bool { return false },
+			canRetry:  func(err error) bool { return true },
+			prepareForRetry: func(ctx context.Context) error {
+				prepareCalls++
+				return nil
+			},
+		}
+
+		p := &pipeline{
+			Executor:              executor,
+			Inbound:               inbound,
+			Outbound:              outbound,
+			maxSameChannelRetries: 2,
+		}
+
+		res, err := p.Process(ctx, &httpclient.Request{})
+		require.Error(t, err)
+		require.Nil(t, res)
+		require.Equal(t, 1, execCalls)
+		require.Zero(t, prepareCalls)
+	})
+
+	t.Run("UnsafeRequestBlocksCrossChannelRetry", func(t *testing.T) {
+		execCalls := 0
+		executor := &mockExecutor{
+			do: func(ctx context.Context, req *httpclient.Request) (*httpclient.Response, error) {
+				execCalls++
+				return nil, errors.New("channel error")
+			},
+		}
+
+		switchCalls := 0
+		outbound := &mockOutbound{
+			retrySafe:       func() bool { return false },
+			canRetry:        func(err error) bool { return false },
+			hasMoreChannels: func() bool { return true },
+			nextChannel: func(ctx context.Context) error {
+				switchCalls++
+				return nil
+			},
+		}
+
+		p := &pipeline{
+			Executor:          executor,
+			Inbound:           inbound,
+			Outbound:          outbound,
+			maxChannelRetries: 2,
+		}
+
+		res, err := p.Process(ctx, &httpclient.Request{})
+		require.Error(t, err)
+		require.Nil(t, res)
+		require.Equal(t, 1, execCalls)
+		require.Zero(t, switchCalls)
+	})
+
+	t.Run("UnauthorizedRefreshesAndReplaysOnce", func(t *testing.T) {
+		execCalls := 0
+		executor := &mockExecutor{
+			do: func(ctx context.Context, req *httpclient.Request) (*httpclient.Response, error) {
+				execCalls++
+				if execCalls == 1 {
+					return nil, &httpclient.Error{StatusCode: http.StatusUnauthorized}
+				}
+
+				return &httpclient.Response{}, nil
+			},
+		}
+
+		refreshCalls := 0
+		switchCalls := 0
+		outbound := &mockOutbound{
+			canRetry: func(err error) bool { return false },
+			transformError: func(ctx context.Context, err *httpclient.Error) *llm.ResponseError {
+				return &llm.ResponseError{StatusCode: err.StatusCode, Cause: err}
+			},
+			refreshAuth: func(ctx context.Context) (bool, error) {
+				refreshCalls++
+				return true, nil
+			},
+			hasMoreChannels: func() bool { return true },
+			nextChannel: func(ctx context.Context) error {
+				switchCalls++
+				return nil
+			},
+		}
+
+		p := &pipeline{
+			Executor:              executor,
+			Inbound:               inbound,
+			Outbound:              outbound,
+			maxSameChannelRetries: 2,
+			maxChannelRetries:     2,
+		}
+
+		res, err := p.Process(ctx, &httpclient.Request{})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.Equal(t, 2, execCalls)
+		require.Equal(t, 1, refreshCalls)
+		require.Zero(t, switchCalls)
+	})
+
+	t.Run("UnauthorizedRefreshBudgetIsNotConsumedByNonRefreshableChannel", func(t *testing.T) {
+		execCalls := 0
+		executor := &mockExecutor{
+			do: func(ctx context.Context, req *httpclient.Request) (*httpclient.Response, error) {
+				execCalls++
+				return nil, &httpclient.Error{StatusCode: http.StatusUnauthorized}
+			},
+		}
+
+		refreshCalls := 0
+		switchCalls := 0
+		outbound := &mockOutbound{
+			canRetry: func(err error) bool { return false },
+			transformError: func(ctx context.Context, err *httpclient.Error) *llm.ResponseError {
+				return &llm.ResponseError{StatusCode: err.StatusCode, Cause: err}
+			},
+			refreshAuth: func(ctx context.Context) (bool, error) {
+				refreshCalls++
+				return refreshCalls > 1, nil
+			},
+			canFailover:     func(err error) bool { return true },
+			hasMoreChannels: func() bool { return true },
+			nextChannel: func(ctx context.Context) error {
+				switchCalls++
+				return nil
+			},
+		}
+
+		p := &pipeline{
+			Executor:          executor,
+			Inbound:           inbound,
+			Outbound:          outbound,
+			maxChannelRetries: 1,
+		}
+
+		res, err := p.Process(ctx, &httpclient.Request{})
+		require.Error(t, err)
+		require.Nil(t, res)
+		require.Equal(t, 3, execCalls)
+		require.Equal(t, 2, refreshCalls)
+		require.Equal(t, 1, switchCalls)
+	})
+
+	t.Run("UnauthorizedNeverRefreshesTwice", func(t *testing.T) {
+		execCalls := 0
+		executor := &mockExecutor{
+			do: func(ctx context.Context, req *httpclient.Request) (*httpclient.Response, error) {
+				execCalls++
+				return nil, &httpclient.Error{StatusCode: http.StatusUnauthorized}
+			},
+		}
+
+		refreshCalls := 0
+		switchCalls := 0
+		outbound := &mockOutbound{
+			canRetry: func(err error) bool { return false },
+			transformError: func(ctx context.Context, err *httpclient.Error) *llm.ResponseError {
+				return &llm.ResponseError{StatusCode: err.StatusCode, Cause: err}
+			},
+			refreshAuth: func(ctx context.Context) (bool, error) {
+				refreshCalls++
+				return true, nil
+			},
+			canFailover:     func(err error) bool { return true },
+			hasMoreChannels: func() bool { return true },
+			nextChannel: func(ctx context.Context) error {
+				switchCalls++
+				return nil
+			},
+		}
+
+		p := &pipeline{
+			Executor:          executor,
+			Inbound:           inbound,
+			Outbound:          outbound,
+			maxChannelRetries: 2,
+		}
+
+		res, err := p.Process(ctx, &httpclient.Request{})
+		require.Error(t, err)
+		require.Nil(t, res)
+		require.Equal(t, 4, execCalls)
+		require.Equal(t, 1, refreshCalls)
+		require.Equal(t, 2, switchCalls)
+	})
+
+	t.Run("NonRetryableStatusDoesNotSwitchChannels", func(t *testing.T) {
+		execCalls := 0
+		executor := &mockExecutor{
+			do: func(ctx context.Context, req *httpclient.Request) (*httpclient.Response, error) {
+				execCalls++
+				return nil, &httpclient.Error{StatusCode: http.StatusBadRequest}
+			},
+		}
+
+		switchCalls := 0
+		outbound := &mockOutbound{
+			canRetry:        func(err error) bool { return false },
+			canFailover:     func(err error) bool { return false },
+			hasMoreChannels: func() bool { return true },
+			nextChannel: func(ctx context.Context) error {
+				switchCalls++
+				return nil
+			},
+		}
+
+		p := &pipeline{
+			Executor:          executor,
+			Inbound:           inbound,
+			Outbound:          outbound,
+			maxChannelRetries: 2,
+		}
+
+		res, err := p.Process(ctx, &httpclient.Request{})
+		require.Error(t, err)
+		require.Nil(t, res)
+		require.Equal(t, 1, execCalls)
+		require.Zero(t, switchCalls)
+	})
 
 	t.Run("SameChannelRetrySuccess", func(t *testing.T) {
 		execCalls := 0
@@ -814,6 +1076,29 @@ func TestPipeline_PreReadLlmStreamAllowsLargeFirstMeaningfulEvent(t *testing.T) 
 	require.False(t, sourceStream.closed)
 	require.True(t, stream.Next())
 	require.Equal(t, largeContent, *stream.Current().Choices[0].Delta.Content.Content)
+}
+
+func TestPipeline_Process_RetriesDisabledSkipsUnauthorizedRefresh(t *testing.T) {
+	attempts := 0
+	refreshCalls := 0
+	executor := &mockExecutor{
+		do: func(context.Context, *httpclient.Request) (*httpclient.Response, error) {
+			attempts++
+			return nil, &httpclient.Error{StatusCode: http.StatusUnauthorized}
+		},
+	}
+	outbound := &mockOutbound{
+		refreshAuth: func(context.Context) (bool, error) {
+			refreshCalls++
+			return true, nil
+		},
+	}
+	p := NewFactory(executor).Pipeline(&mockInbound{}, outbound, WithRetriesDisabled())
+
+	_, err := p.Process(context.Background(), &httpclient.Request{})
+	require.Error(t, err)
+	require.Equal(t, 1, attempts)
+	require.Zero(t, refreshCalls)
 }
 
 func TestPipeline_Process_StreamEventTooLargeBypassesAllRetries(t *testing.T) {

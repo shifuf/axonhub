@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,9 +19,10 @@ func (svc *ChannelService) evaluateClientCancellationForFailure(ctx context.Cont
 		return false
 	}
 
-	// A non-stream abort or a stream that never received a first token says
-	// nothing about the upstream channel. Preserve that eligibility boundary.
-	if !perf.Stream || perf.FirstTokenTime == nil {
+	// Keep first-token evidence for producers that do not record response
+	// headers. The evidence requirement applies to both streaming and buffered
+	// upstream responses.
+	if !perf.UpstreamResponseReceived && perf.FirstTokenTime == nil {
 		return false
 	}
 
@@ -41,17 +43,32 @@ func (svc *ChannelService) evaluateClientCancellationForFailure(ctx context.Cont
 	// Timestamp after taking the lock so concurrent append order is chronological.
 	now := time.Now()
 	svc.pruneClientCancellationWindowsLocked(now, 0)
+	eventTime := perf.EndTime
+	if eventTime.IsZero() {
+		eventTime = now
+	}
+	if eventTime.After(now) {
+		eventTime = now
+	}
+	windowStart := now.Add(-time.Duration(windowMinutes) * time.Minute)
+	if eventTime.Before(windowStart) {
+		svc.apiKeyErrorCountsLock.Unlock()
+
+		return false
+	}
 	if svc.cancellationWindow[perf.ChannelID] == nil {
 		svc.cancellationWindow[perf.ChannelID] = make(map[string][]time.Time)
 	}
-	// Keeping the latest threshold samples is sufficient to decide whether at
-	// least threshold cancellations remain in the window. A hot, frozen pair
-	// must not accumulate an unbounded timestamp slice.
 	timestamps := svc.cancellationWindow[perf.ChannelID][counterKey]
-	if len(timestamps) >= threshold {
-		timestamps = append(timestamps[:0], timestamps[len(timestamps)-threshold+1:]...)
+	insertAt := sort.Search(len(timestamps), func(i int) bool {
+		return !timestamps[i].Before(eventTime)
+	})
+	timestamps = append(timestamps, time.Time{})
+	copy(timestamps[insertAt+1:], timestamps[insertAt:])
+	timestamps[insertAt] = eventTime
+	if len(timestamps) > maxClientCancellationThreshold {
+		timestamps = append(timestamps[:0], timestamps[len(timestamps)-maxClientCancellationThreshold:]...)
 	}
-	timestamps = append(timestamps, now)
 	svc.cancellationWindow[perf.ChannelID][counterKey] = timestamps
 	count := len(timestamps)
 	shouldAct := count >= threshold && !svc.cancellationActionsInFlight[perf.ChannelID][counterKey]

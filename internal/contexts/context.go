@@ -136,6 +136,16 @@ func GetChannelAPIKey(ctx context.Context) (string, bool) {
 	return "", false
 }
 
+// ClearChannelAPIKey removes the previous attempt's credential reference when
+// retry routing switches to a channel with a different authentication mode.
+func ClearChannelAPIKey(ctx context.Context) {
+	container := getContainer(ctx)
+	container.mu.Lock()
+	defer container.mu.Unlock()
+
+	container.ChannelAPIKey = nil
+}
+
 // WithRequestModel stores the model being dispatched to the channel in the context.
 func WithRequestModel(ctx context.Context, model string) context.Context {
 	container := getContainer(ctx)

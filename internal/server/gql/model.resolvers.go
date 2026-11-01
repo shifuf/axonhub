@@ -197,5 +197,9 @@ func (r *queryResolver) QueryUnassociatedChannels(ctx context.Context) ([]*biz.U
 
 // QueryFrozenModelChannels is the resolver for the queryFrozenModelChannels field.
 func (r *queryResolver) QueryFrozenModelChannels(ctx context.Context, modelID string) ([]*biz.FrozenModelChannel, error) {
+	if err := authz.RequireScope(ctx, scopes.ScopeReadChannels); err != nil {
+		return nil, err
+	}
+
 	return r.modelService.QueryFrozenModelChannels(ctx, modelID)
 }
