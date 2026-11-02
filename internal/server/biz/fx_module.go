@@ -39,6 +39,9 @@ var Module = fx.Module("biz",
 	fx.Invoke(func(channelSvc *ChannelService, quotaSvc *ProviderQuotaService) {
 		channelSvc.SetChannelProviderQuotaInvalidator(quotaSvc)
 	}),
+	fx.Invoke(func(usageSvc *UsageLogService, quotaSvc *ProviderQuotaService) {
+		usageSvc.SetProviderQuotaService(quotaSvc)
+	}),
 	// Deleting a channel must also drop it from model association rules, so the
 	// channel service needs the model service. Wired here instead of through the
 	// constructors because ModelService already depends on ChannelService.

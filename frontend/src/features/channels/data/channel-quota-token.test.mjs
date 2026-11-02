@@ -21,20 +21,21 @@ test('dedicated quota token is submitted by channel forms and has an unsaved tes
   assert.match(schema, /credentials:\s*z\.object\(\{[\s\S]*?quotaApiKey:\s*z\.string\(\)\.optional\(\)/);
   assert.match(schema, /credentials:\s*z\s*\.object\(\{[\s\S]*?quotaApiKey:\s*z\.string\(\)\.optional\(\)/);
   assert.match(channels, /credentials\s*\{[\s\S]*?quotaApiKey/);
-  assert.match(channels, /mutation TestChannelQuota\([\s\S]*?quotaApiKey: String!/);
+  assert.match(channels, /mutation TestChannelBalance\([\s\S]*?quotaApiKey: String!/);
   assert.match(dialog, /name='credentials\.quotaApiKey'/);
-  assert.match(dialog, /testChannelQuota\.mutateAsync\(\{[\s\S]*?form\.getValues\('credentials\.quotaApiKey'\)/);
+  assert.match(dialog, /testChannelBalance\.mutateAsync\(\{[\s\S]*?form\.getValues\('credentials\.quotaApiKey'\)/);
   assert.match(dialog, /setQuotaTestResult\(result\)/);
   assert.match(dialog, /data-testid='channel-quota-test-result'/);
   assert.match(dialog, /<CompatibleQuotaSummary value=\{quotaTestResult\.quotaData\}/);
   assert.match(dialog, /hasQuotaApiKey[\s\S]*?delete updateInput\.credentials/);
 });
 
-test('OpenAI-compatible and DeepSeek channels expose the dedicated quota-token control', () => {
+test('all channel types expose the standalone balance-token control', () => {
   const dialog = read('../components/channels-action-dialog.tsx');
 
-  assert.match(dialog, /'openai',\s*'openai_responses',\s*'deepseek',\s*'deepseek_anthropic'/);
-  assert.doesNotMatch(dialog, /known quota-provider hosts|synthetic\\\.new\|neuralwatt/);
+  assert.match(dialog, /const showBalanceToken = true/);
+  assert.match(dialog, /useTestChannelBalance/);
+  assert.doesNotMatch(dialog, /const showBalanceToken = \[/);
 });
 
 test('quota-token test result schema accepts the existing provider quota payload', async () => {

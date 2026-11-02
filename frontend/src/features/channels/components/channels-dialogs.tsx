@@ -16,6 +16,7 @@ import { ChannelsBulkEnableDialog } from './channels-bulk-enable-dialog';
 import { ChannelsBulkImportDialog } from './channels-bulk-import-dialog';
 import { ChannelsBulkOrderingDialog } from './channels-bulk-ordering-dialog';
 import { ChannelsBulkTestDialog } from './channels-bulk-test-dialog';
+import { ChannelsBalanceDialog } from './channels-balance-dialog';
 import { ChannelsDeleteDialog } from './channels-delete-dialog';
 import { ChannelsDisabledAPIKeysDialog } from './channels-disabled-api-keys-dialog';
 import { ChannelsEndpointsDialog } from './channels-endpoints-dialog';
@@ -92,6 +93,18 @@ export function ChannelsDialogs() {
 
       {currentRow && (
         <>
+          <ChannelsBalanceDialog
+            key={`channel-balance-${currentRow.id}`}
+            open={open === 'balance'}
+            onOpenChange={(isOpen) => {
+              if (isOpen) setOpen('balance');
+              else {
+                setOpen(null);
+                setTimeout(() => setCurrentRow(null), 500);
+              }
+            }}
+            currentRow={currentRow}
+          />
           <ChannelsActionDialog
             key={`channel-edit-${currentRow.id}`}
             open={open === 'edit'}

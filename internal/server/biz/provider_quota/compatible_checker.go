@@ -69,6 +69,7 @@ func (c *CompatibleQuotaChecker) CheckQuota(ctx context.Context, ch *ent.Channel
 		query  func(context.Context, *httpclient.HttpClient, string, string) (QuotaData, bool, error)
 	}{
 		{source: compatibleSourceNewAPI, query: queryNewAPIQuota},
+		{source: compatibleSourceSub2API, query: querySub2APIAccountQuota},
 		{source: compatibleSourceSub2API, query: querySub2APIQuota},
 		{source: compatibleSourceOpenAIBilling, query: queryOpenAIBillingQuota},
 		{source: compatibleSourceDeepSeek, query: queryDeepSeekQuota},
@@ -90,6 +91,44 @@ func (c *CompatibleQuotaChecker) CheckQuota(ctx context.Context, ch *ent.Channel
 	}
 
 	return QuotaData{}, fmt.Errorf("no compatible balance endpoint returned usable quota data (%s)", strings.Join(failures, "; "))
+}
+
+// CheckStandaloneBalance probes only the supported self-hosted gateway APIs.
+// It intentionally does not inspect a channel type or provider registration.
+func (c *CompatibleQuotaChecker) CheckStandaloneBalance(ctx context.Context, baseURL, token string) (QuotaData, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return QuotaData{}, errors.New("balance token is required")
+	}
+
+	origin, err := compatibleQuotaOrigin(baseURL)
+	if err != nil {
+		return QuotaData{}, err
+	}
+
+	probes := []struct {
+		source string
+		query  func(context.Context, *httpclient.HttpClient, string, string) (QuotaData, bool, error)
+	}{
+		{source: compatibleSourceNewAPI, query: queryNewAPIQuota},
+		{source: compatibleSourceSub2API, query: querySub2APIAccountQuota},
+	}
+
+	var failures []string
+	for _, probe := range probes {
+		data, recognized, probeErr := probe.query(ctx, c.httpClient, origin, token)
+		if recognized {
+			return NormalizeQuotaData(data), nil
+		}
+		if probeErr != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", probe.source, probeErr))
+		}
+	}
+
+	if len(failures) == 0 {
+		return QuotaData{}, errors.New("no New API or Sub2API balance endpoint returned usable data")
+	}
+	return QuotaData{}, fmt.Errorf("no New API or Sub2API balance endpoint returned usable data (%s)", strings.Join(failures, "; "))
 }
 
 func supportsCompatibleQuotaChannelType(channelType channel.Type) bool {
@@ -135,7 +174,7 @@ func queryNewAPIQuota(
 ) (QuotaData, bool, error) {
 	root, err := compatibleGetJSON(ctx, hc, origin+"/api/usage/token/", token)
 	if err != nil {
-		return QuotaData{}, false, err
+		return queryNewAPIAccountQuota(ctx, hc, origin, token, err)
 	}
 
 	data := compatibleDataMap(root)
@@ -144,7 +183,7 @@ func queryNewAPIQuota(
 	totalAvailable, hasAvailable := compatibleNumber(data["total_available"])
 	unlimited := compatibleBool(data["unlimited_quota"]) || (hasGranted && totalGranted < 0)
 	if !unlimited && !hasGranted && !hasUsed && !hasAvailable {
-		return QuotaData{}, false, nil
+		return queryNewAPIAccountQuota(ctx, hc, origin, token, nil)
 	}
 
 	rawData := map[string]any{
@@ -189,6 +228,116 @@ func queryNewAPIQuota(
 	return compatibleWalletQuota("USD", availableUSD, nullableCompatibleNumber(grantedUSD, hasGranted), nullableCompatibleNumber(usedUSD, hasUsed), rawData), true, nil
 }
 
+// queryNewAPIAccountQuota supports the account endpoint used by current New API
+// deployments. Unlike /api/usage/token/, /api/user/self returns the user's
+// remaining quota in the site's integer quota unit. `quota` is already the
+// remaining amount; `used_quota` is cumulative usage and must not be subtracted
+// from it a second time.
+func queryNewAPIAccountQuota(
+	ctx context.Context,
+	hc *httpclient.HttpClient,
+	origin string,
+	token string,
+	usageErr error,
+) (QuotaData, bool, error) {
+	root, err := compatibleGetJSON(ctx, hc, origin+"/api/user/self", token)
+	if err != nil {
+		if usageErr != nil {
+			return QuotaData{}, false, fmt.Errorf("token usage endpoint: %w; account endpoint: %v", usageErr, err)
+		}
+		return QuotaData{}, false, err
+	}
+
+	data := compatibleDataMap(root)
+	quota, hasQuota := compatibleNumber(data["quota"])
+	if !hasQuota {
+		return QuotaData{}, false, nil
+	}
+
+	rawData := map[string]any{
+		"source":          compatibleSourceNewAPI,
+		"quota_remaining": quota,
+	}
+	if usedQuota, ok := compatibleNumber(data["used_quota"]); ok {
+		rawData["quota_used"] = usedQuota
+	}
+
+	quotaPerUnit, displayCurrency, usdPerDisplayUnit := queryNewAPICurrencyBasis(ctx, hc, origin)
+	if quotaPerUnit <= 0 {
+		quotaPerUnit = compatibleQuotaPerUSD
+	}
+
+	if quota < 0 {
+		rawData["unlimited_quota"] = true
+		rawData["quota_per_unit"] = quotaPerUnit
+		return QuotaData{
+			Status:       "available",
+			ProviderType: "compatible",
+			RawData:      rawData,
+			Ready:        true,
+		}, true, nil
+	}
+
+	if displayCurrency != "" {
+		rawData["display_currency"] = displayCurrency
+	}
+	rawData["quota_per_unit"] = quotaPerUnit
+	remainingDisplayUnits := math.Max(0, quota/float64(quotaPerUnit))
+	remainingUSD := remainingDisplayUnits * usdPerDisplayUnit
+	rawData["balance_site_units"] = remainingDisplayUnits
+	rawData["balance_usd"] = nonNegativeFloat(remainingUSD)
+	rawData["total_available_usd"] = nonNegativeFloat(remainingUSD)
+
+	return compatibleWalletQuota("USD", remainingUSD, nil, nil, rawData), true, nil
+}
+
+// queryNewAPICurrencyBasis reads the public New API status document. New API
+// stores quota in an integer unit and publishes how many of those units make
+// one displayed currency unit. The returned rate converts one displayed unit
+// to USD, so CNY sites with usd_exchange_rate=7.3 use 1/7.3.
+func queryNewAPICurrencyBasis(
+	ctx context.Context,
+	hc *httpclient.HttpClient,
+	origin string,
+) (int64, string, float64) {
+	// status is intentionally public, so it is queried without credentials.
+	root, err := compatibleGetJSON(ctx, hc, origin+"/api/status", "")
+	if err != nil {
+		return compatibleQuotaPerUSD, "USD", 1
+	}
+
+	data := compatibleDataMap(root)
+	quotaPerUnitFloat, hasQuotaPerUnit := compatibleNumber(data["quota_per_unit"])
+	quotaPerUnit := int64(quotaPerUnitFloat)
+	if !hasQuotaPerUnit || quotaPerUnit <= 0 {
+		quotaPerUnit = compatibleQuotaPerUSD
+	}
+
+	currency := strings.ToUpper(strings.TrimSpace(compatibleString(data["quota_display_type"])))
+	if currency == "" {
+		currency = "USD"
+	}
+
+	rate := 1.0
+	switch currency {
+	case "CNY", "RMB":
+		if value, ok := compatibleNumber(data["usd_exchange_rate"]); ok && value > 0 {
+			rate = 1 / value
+		}
+	case "USD":
+		// Keep the default rate.
+	case "CUSTOM":
+		if value, ok := compatibleNumber(data["custom_currency_exchange_rate"]); ok && value > 0 {
+			rate = 1 / value
+		}
+	default:
+		// Unknown display currencies have no reliable USD conversion metadata.
+		// Keep the quota-per-unit default rather than inventing a rate.
+	}
+
+	return quotaPerUnit, currency, rate
+}
+
 func querySub2APIQuota(
 	ctx context.Context,
 	hc *httpclient.HttpClient,
@@ -227,6 +376,29 @@ func querySub2APIQuota(
 	}
 
 	return compatibleWalletQuota("USD", balance, nil, nil, rawData), true, nil
+}
+
+func querySub2APIAccountQuota(
+	ctx context.Context,
+	hc *httpclient.HttpClient,
+	origin string,
+	token string,
+) (QuotaData, bool, error) {
+	root, err := compatibleGetJSON(ctx, hc, origin+"/api/v1/auth/me", token)
+	if err != nil {
+		return QuotaData{}, false, err
+	}
+
+	data := compatibleDataMap(root)
+	balance, ok := compatibleNumber(data["balance"])
+	if !ok {
+		return QuotaData{}, false, nil
+	}
+
+	return compatibleWalletQuota("USD", balance, nil, nil, map[string]any{
+		"source":      compatibleSourceSub2API,
+		"balance_usd": nonNegativeFloat(balance),
+	}), true, nil
 }
 
 func queryOpenAIBillingQuota(
@@ -425,12 +597,14 @@ func compatibleGetJSON(
 	endpoint string,
 	token string,
 ) (map[string]any, error) {
-	request := httpclient.NewRequestBuilder().
+	builder := httpclient.NewRequestBuilder().
 		WithMethod(http.MethodGet).
 		WithURL(endpoint).
-		WithBearerToken(token).
-		WithHeader("Accept", "application/json").
-		Build()
+		WithHeader("Accept", "application/json")
+	if strings.TrimSpace(token) != "" {
+		builder.WithBearerToken(token)
+	}
+	request := builder.Build()
 
 	response, err := hc.Do(ctx, request)
 	if err != nil {

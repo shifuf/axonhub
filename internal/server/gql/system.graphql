@@ -424,6 +424,11 @@ input TriggerGcCleanupInput {
     requestBodiesCleanupDays: Int
     responseBodiesCleanupDays: Int
     responseChunksCleanupDays: Int
+    requestsCleanupHours: Int
+    usageLogsCleanupHours: Int
+    requestBodiesCleanupHours: Int
+    responseBodiesCleanupHours: Int
+    responseChunksCleanupHours: Int
 }
 
 type GcCleanupPreviewItem {
@@ -431,6 +436,7 @@ type GcCleanupPreviewItem {
     estimatedCount: Int!
     cutoffTime: Time!
     retentionDays: Int!
+    retentionHours: Int!
 }
 
 type ProvidersCatalog {
@@ -499,6 +505,8 @@ extend type Mutation {
   updateSecuritySettings(input: UpdateSecuritySettingsInput!): Boolean!
   checkProviderQuotas: Boolean!
   resetChannelQuotaNow(channelID: ID!): Boolean!
+  refreshChannelBalance(channelID: ID!): Boolean!
+  setChannelManualBalance(channelID: ID!, balanceUSD: Float!): Boolean!
   triggerGcCleanup(input: TriggerGcCleanupInput!): Boolean!
   saveProxyPreset(input: SaveProxyPresetInput!): Boolean!
   deleteProxyPreset(url: String!): Boolean!

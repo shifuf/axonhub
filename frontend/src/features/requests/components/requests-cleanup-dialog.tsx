@@ -27,6 +27,7 @@ import {
 import { useDebounce } from '@/hooks/use-debounce';
 
 const RETENTION_PRESETS = [1, 7, 30, 90] as const;
+const RETENTION_HOUR_PRESETS = [1, 6, 12] as const;
 
 type TargetKey = 'requests' | 'requestBodies' | 'responseBodies' | 'responseChunks' | 'usageLogs';
 
@@ -63,15 +64,21 @@ function clampRetentionDays(days: number): number {
 }
 
 // The GC mutation treats 0 as "this resource is not selected".
-export function buildCleanupInput(retentionDays: number, targets: Record<TargetKey, boolean>): TriggerGcCleanupInput {
+export function buildCleanupInput(retentionDays: number, targets: Record<TargetKey, boolean>, retentionHours = 0): TriggerGcCleanupInput {
   const days = clampRetentionDays(retentionDays);
+  const hours = retentionHours > 0 ? Math.min(87600, Math.max(1, Math.trunc(retentionHours))) : 0;
 
   return {
-    requestsCleanupDays: targets.requests ? days : 0,
-    usageLogsCleanupDays: targets.usageLogs ? days : 0,
-    requestBodiesCleanupDays: targets.requestBodies ? days : 0,
-    responseBodiesCleanupDays: targets.responseBodies ? days : 0,
-    responseChunksCleanupDays: targets.responseChunks ? days : 0,
+    requestsCleanupDays: targets.requests && hours === 0 ? days : 0,
+    usageLogsCleanupDays: targets.usageLogs && hours === 0 ? days : 0,
+    requestBodiesCleanupDays: targets.requestBodies && hours === 0 ? days : 0,
+    responseBodiesCleanupDays: targets.responseBodies && hours === 0 ? days : 0,
+    responseChunksCleanupDays: targets.responseChunks && hours === 0 ? days : 0,
+    requestsCleanupHours: targets.requests ? hours : 0,
+    usageLogsCleanupHours: targets.usageLogs ? hours : 0,
+    requestBodiesCleanupHours: targets.requestBodies ? hours : 0,
+    responseBodiesCleanupHours: targets.responseBodies ? hours : 0,
+    responseChunksCleanupHours: targets.responseChunks ? hours : 0,
   };
 }
 
@@ -88,13 +95,16 @@ export function RequestsCleanupDialog({ open, onOpenChange, onCleaned }: Props) 
 
   const [retention, setRetention] = useState<string>('30');
   const [customDays, setCustomDays] = useState(30);
+  const [customHours, setCustomHours] = useState(1);
   const [targets, setTargets] = useState<Record<TargetKey, boolean>>(DEFAULT_TARGETS);
   const [previewItems, setPreviewItems] = useState<GcCleanupPreviewItem[]>([]);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
+  const isHours = retention.startsWith('hours:');
+  const retentionHours = isHours ? Number(retention.slice('hours:'.length)) : retention === 'customHours' ? Math.min(87600, Math.max(1, Math.trunc(customHours))) : 0;
   const retentionDays = retention === 'custom' ? clampRetentionDays(customDays) : Number(retention);
-  const input = useMemo(() => buildCleanupInput(retentionDays, targets), [retentionDays, targets]);
+  const input = useMemo(() => buildCleanupInput(retentionDays, targets, retentionHours), [retentionDays, retentionHours, targets]);
   const debouncedInput = useDebounce(JSON.stringify(input), 400);
   const hasTarget = TARGET_LABELS.some(([key]) => targets[key] === true);
 
@@ -178,7 +188,13 @@ export function RequestsCleanupDialog({ open, onOpenChange, onCleaned }: Props) 
                       {t('requests.cleanup.retention.options.' + days)}
                     </SelectItem>
                   ))}
+                  {RETENTION_HOUR_PRESETS.map((hours) => (
+                    <SelectItem key={hours} value={'hours:' + hours}>
+                      {t('requests.cleanup.retention.options.hours', { hours })}
+                    </SelectItem>
+                  ))}
                   <SelectItem value='custom'>{t('requests.cleanup.retention.custom')}</SelectItem>
+                  <SelectItem value='customHours'>{t('requests.cleanup.retention.customHours')}</SelectItem>
                 </SelectContent>
               </Select>
               {retention === 'custom' && (
@@ -199,9 +215,29 @@ export function RequestsCleanupDialog({ open, onOpenChange, onCleaned }: Props) 
                   <span className='text-muted-foreground text-sm'>{t('requests.cleanup.retention.days')}</span>
                 </div>
               )}
+              {retention === 'customHours' && (
+                <div className='flex items-center gap-2'>
+                  <Input
+                    id='requests-cleanup-retention-hours'
+                    type='number'
+                    min='1'
+                    max='87600'
+                    value={customHours}
+                    onChange={(event) => {
+                      const raw = event.target.value;
+                      if (raw.trim() === '') return;
+                      setCustomHours(Math.min(87600, Math.max(1, Math.trunc(parseInt(raw, 10)))));
+                    }}
+                    className='w-24'
+                  />
+                  <span className='text-muted-foreground text-sm'>{t('requests.cleanup.retention.hours')}</span>
+                </div>
+              )}
             </div>
             <p className='text-muted-foreground text-xs'>
-              {t('requests.cleanup.retention.hint', { days: retentionDays })}
+              {isHours || retention === 'customHours'
+                ? t('requests.cleanup.retention.hoursHint', { hours: retentionHours })
+                : t('requests.cleanup.retention.hint', { days: retentionDays })}
             </p>
           </div>
 

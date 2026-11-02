@@ -27,11 +27,16 @@ import (
 var defaultBatchSize = 500
 
 type TriggerGcCleanupInput struct {
-	RequestsCleanupDays       int `json:"requests_cleanup_days"`
-	UsageLogsCleanupDays      int `json:"usage_logs_cleanup_days"`
-	RequestBodiesCleanupDays  int `json:"request_bodies_cleanup_days"`
-	ResponseBodiesCleanupDays int `json:"response_bodies_cleanup_days"`
-	ResponseChunksCleanupDays int `json:"response_chunks_cleanup_days"`
+	RequestsCleanupDays        int `json:"requests_cleanup_days"`
+	UsageLogsCleanupDays       int `json:"usage_logs_cleanup_days"`
+	RequestBodiesCleanupDays   int `json:"request_bodies_cleanup_days"`
+	ResponseBodiesCleanupDays  int `json:"response_bodies_cleanup_days"`
+	ResponseChunksCleanupDays  int `json:"response_chunks_cleanup_days"`
+	RequestsCleanupHours       int `json:"requests_cleanup_hours"`
+	UsageLogsCleanupHours      int `json:"usage_logs_cleanup_hours"`
+	RequestBodiesCleanupHours  int `json:"request_bodies_cleanup_hours"`
+	ResponseBodiesCleanupHours int `json:"response_bodies_cleanup_hours"`
+	ResponseChunksCleanupHours int `json:"response_chunks_cleanup_hours"`
 }
 
 type GcCleanupPreviewItem struct {
@@ -39,6 +44,17 @@ type GcCleanupPreviewItem struct {
 	EstimatedCount int       `json:"estimated_count"`
 	CutoffTime     time.Time `json:"cutoff_time"`
 	RetentionDays  int       `json:"retention_days"`
+	RetentionHours int       `json:"retention_hours"`
+}
+
+func cleanupDuration(days, hours int) time.Duration {
+	if hours > 0 {
+		return time.Duration(hours) * time.Hour
+	}
+	if days > 0 {
+		return time.Duration(days) * 24 * time.Hour
+	}
+	return 0
 }
 
 type Config struct {
@@ -110,8 +126,8 @@ func (w *Worker) getBatchSize() int {
 }
 
 // runCleanup executes the cleanup process based on storage policy.
-// When manual is true and manualDays is provided, those days override the policy values.
-func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[string]int) {
+// When manual is true and manualDurations is provided, those durations override the policy values.
+func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDurations map[string]time.Duration) {
 	log.Info(ctx, "Starting cleanup process", log.Bool("manual", manual))
 
 	ctx = ent.NewContext(ctx, w.Ent)
@@ -127,20 +143,20 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 
 	for _, option := range policy.CleanupOptions {
 		if option.Enabled || manual {
-			if manual && manualDays != nil {
-				if _, ok := manualDays[option.ResourceType]; !ok {
+			if manual && manualDurations != nil {
+				if _, ok := manualDurations[option.ResourceType]; !ok {
 					continue
 				}
 			}
-			days := option.CleanupDays
-			if manual && manualDays != nil {
-				if d, ok := manualDays[option.ResourceType]; ok {
-					days = d
+			duration := time.Duration(option.CleanupDays) * 24 * time.Hour
+			if manual && manualDurations != nil {
+				if d, ok := manualDurations[option.ResourceType]; ok {
+					duration = d
 				}
 			}
 			switch option.ResourceType {
 			case biz.CleanupResourceRequestBodies:
-				err := w.cleanupRequestBodies(ctx, days)
+				err := w.cleanupRequestBodiesDuration(ctx, duration)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup request bodies",
 						log.String("resource", option.ResourceType),
@@ -148,10 +164,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 				} else {
 					log.Info(ctx, "Successfully cleaned up request bodies",
 						log.String("resource", option.ResourceType),
-						log.Int("cleanup_days", days))
+						log.Duration("cleanup_duration", duration))
 				}
 			case biz.CleanupResourceResponseBodies:
-				err := w.cleanupResponseBodies(ctx, days)
+				err := w.cleanupResponseBodiesDuration(ctx, duration)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup response bodies",
 						log.String("resource", option.ResourceType),
@@ -159,10 +175,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 				} else {
 					log.Info(ctx, "Successfully cleaned up response bodies",
 						log.String("resource", option.ResourceType),
-						log.Int("cleanup_days", days))
+						log.Duration("cleanup_duration", duration))
 				}
 			case biz.CleanupResourceResponseChunks:
-				err := w.cleanupResponseChunks(ctx, days)
+				err := w.cleanupResponseChunksDuration(ctx, duration)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup response chunks",
 						log.String("resource", option.ResourceType),
@@ -170,10 +186,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 				} else {
 					log.Info(ctx, "Successfully cleaned up response chunks",
 						log.String("resource", option.ResourceType),
-						log.Int("cleanup_days", days))
+						log.Duration("cleanup_duration", duration))
 				}
 			case biz.CleanupResourceRequests:
-				err := w.cleanupRequests(ctx, days, manual)
+				err := w.cleanupRequestsDuration(ctx, duration, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup requests",
 						log.String("resource", option.ResourceType),
@@ -181,10 +197,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 				} else {
 					log.Info(ctx, "Successfully cleaned up requests",
 						log.String("resource", option.ResourceType),
-						log.Int("cleanup_days", days))
+						log.Duration("cleanup_duration", duration))
 				}
 
-				err = w.cleanupThreads(ctx, days, manual)
+				err = w.cleanupThreadsDuration(ctx, duration, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup threads",
 						log.String("resource", "threads"),
@@ -192,10 +208,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 				} else {
 					log.Info(ctx, "Successfully cleaned up threads",
 						log.String("resource", "threads"),
-						log.Int("cleanup_days", days))
+						log.Duration("cleanup_duration", duration))
 				}
 
-				err = w.cleanupTraces(ctx, days, manual)
+				err = w.cleanupTracesDuration(ctx, duration, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup traces",
 						log.String("resource", "traces"),
@@ -203,10 +219,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 				} else {
 					log.Info(ctx, "Successfully cleaned up traces",
 						log.String("resource", "traces"),
-						log.Int("cleanup_days", days))
+						log.Duration("cleanup_duration", duration))
 				}
 			case biz.CleanupResourceUsageLogs:
-				err := w.cleanupUsageLogs(ctx, days, manual)
+				err := w.cleanupUsageLogsDuration(ctx, duration, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup usage logs",
 						log.String("resource", option.ResourceType),
@@ -214,7 +230,7 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 				} else {
 					log.Info(ctx, "Successfully cleaned up usage logs",
 						log.String("resource", option.ResourceType),
-						log.Int("cleanup_days", days))
+						log.Duration("cleanup_duration", duration))
 				}
 			default:
 				log.Warn(ctx, "Unknown resource type for cleanup",
@@ -242,14 +258,18 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[str
 	log.Info(ctx, "Cleanup process completed")
 }
 
-// cleanupRequests deletes requests older than the specified number of days.
+// cleanupRequests keeps the legacy day-based helper used by tests and callers.
 func (w *Worker) cleanupRequests(ctx context.Context, cleanupDays int, manual bool) error {
-	if cleanupDays <= 0 {
+	return w.cleanupRequestsDuration(ctx, time.Duration(cleanupDays)*24*time.Hour, manual)
+}
+
+func (w *Worker) cleanupRequestsDuration(ctx context.Context, cleanupDuration time.Duration, manual bool) error {
+	if cleanupDuration <= 0 {
 		log.Debug(ctx, "No cleanup needed for requests")
 		return nil
 	}
 
-	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
+	cutoffTime := time.Now().Add(-cleanupDuration)
 
 	execResult, err := w.cleanupOldRequestExecutions(ctx, cutoffTime)
 	if err != nil {
@@ -485,13 +505,17 @@ func (w *Worker) getDataStorageCached(ctx context.Context, id int, cache map[int
 	return ds, nil
 }
 
-// cleanupUsageLogs deletes usage logs older than the specified number of days.
+// cleanupUsageLogs keeps the legacy day-based helper used by tests and callers.
 func (w *Worker) cleanupUsageLogs(ctx context.Context, cleanupDays int, manual bool) error {
-	if cleanupDays <= 0 {
+	return w.cleanupUsageLogsDuration(ctx, time.Duration(cleanupDays)*24*time.Hour, manual)
+}
+
+func (w *Worker) cleanupUsageLogsDuration(ctx context.Context, cleanupDuration time.Duration, manual bool) error {
+	if cleanupDuration <= 0 {
 		return nil
 	}
 
-	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
+	cutoffTime := time.Now().Add(-cleanupDuration)
 	batchSize := w.getBatchSize()
 
 	result, err := w.deleteInBatches(ctx, func() (int, error) {
@@ -525,14 +549,18 @@ func (w *Worker) cleanupUsageLogs(ctx context.Context, cleanupDays int, manual b
 	return nil
 }
 
-// cleanupThreads deletes threads older than the specified number of days.
+// cleanupThreads keeps the legacy day-based helper used by tests and callers.
 func (w *Worker) cleanupThreads(ctx context.Context, cleanupDays int, manual bool) error {
-	if cleanupDays <= 0 {
+	return w.cleanupThreadsDuration(ctx, time.Duration(cleanupDays)*24*time.Hour, manual)
+}
+
+func (w *Worker) cleanupThreadsDuration(ctx context.Context, cleanupDuration time.Duration, manual bool) error {
+	if cleanupDuration <= 0 {
 		log.Debug(ctx, "No cleanup needed for threads")
 		return nil
 	}
 
-	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
+	cutoffTime := time.Now().Add(-cleanupDuration)
 	batchSize := w.getBatchSize()
 
 	result, err := w.deleteInBatches(ctx, func() (int, error) {
@@ -564,14 +592,18 @@ func (w *Worker) cleanupThreads(ctx context.Context, cleanupDays int, manual boo
 	return nil
 }
 
-// cleanupTraces deletes traces older than the specified number of days.
+// cleanupTraces keeps the legacy day-based helper used by tests and callers.
 func (w *Worker) cleanupTraces(ctx context.Context, cleanupDays int, manual bool) error {
-	if cleanupDays <= 0 {
+	return w.cleanupTracesDuration(ctx, time.Duration(cleanupDays)*24*time.Hour, manual)
+}
+
+func (w *Worker) cleanupTracesDuration(ctx context.Context, cleanupDuration time.Duration, manual bool) error {
+	if cleanupDuration <= 0 {
 		log.Debug(ctx, "No cleanup needed for traces")
 		return nil
 	}
 
-	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
+	cutoffTime := time.Now().Add(-cleanupDuration)
 	batchSize := w.getBatchSize()
 
 	result, err := w.deleteInBatches(ctx, func() (int, error) {
@@ -694,25 +726,26 @@ func (w *Worker) RunVacuumNow(ctx context.Context) error {
 	return w.runVacuum(ctx)
 }
 
-// RunCleanupNow manually triggers the cleanup process with the specified days.
+// RunCleanupNow manually triggers cleanup with day or hour precision. Hours take precedence.
 func (w *Worker) RunCleanupNow(ctx context.Context, input TriggerGcCleanupInput) error {
-	manualDays := make(map[string]int)
-	if input.RequestsCleanupDays > 0 {
-		manualDays[biz.CleanupResourceRequests] = input.RequestsCleanupDays
+	manualDurations := map[string]time.Duration{}
+	cleanupInputs := []struct {
+		resource string
+		days     int
+		hours    int
+	}{
+		{biz.CleanupResourceRequests, input.RequestsCleanupDays, input.RequestsCleanupHours},
+		{biz.CleanupResourceUsageLogs, input.UsageLogsCleanupDays, input.UsageLogsCleanupHours},
+		{biz.CleanupResourceRequestBodies, input.RequestBodiesCleanupDays, input.RequestBodiesCleanupHours},
+		{biz.CleanupResourceResponseBodies, input.ResponseBodiesCleanupDays, input.ResponseBodiesCleanupHours},
+		{biz.CleanupResourceResponseChunks, input.ResponseChunksCleanupDays, input.ResponseChunksCleanupHours},
 	}
-	if input.UsageLogsCleanupDays > 0 {
-		manualDays[biz.CleanupResourceUsageLogs] = input.UsageLogsCleanupDays
+	for _, item := range cleanupInputs {
+		if duration := cleanupDuration(item.days, item.hours); duration > 0 {
+			manualDurations[item.resource] = duration
+		}
 	}
-	if input.RequestBodiesCleanupDays > 0 {
-		manualDays[biz.CleanupResourceRequestBodies] = input.RequestBodiesCleanupDays
-	}
-	if input.ResponseBodiesCleanupDays > 0 {
-		manualDays[biz.CleanupResourceResponseBodies] = input.ResponseBodiesCleanupDays
-	}
-	if input.ResponseChunksCleanupDays > 0 {
-		manualDays[biz.CleanupResourceResponseChunks] = input.ResponseChunksCleanupDays
-	}
-	w.runCleanup(ctx, true, manualDays)
+	w.runCleanup(ctx, true, manualDurations)
 	return nil
 }
 
@@ -724,8 +757,8 @@ func (w *Worker) PreviewCleanup(ctx context.Context, input TriggerGcCleanupInput
 	var items []GcCleanupPreviewItem
 	now := time.Now()
 
-	if input.RequestsCleanupDays > 0 {
-		cutoff := now.AddDate(0, 0, -input.RequestsCleanupDays)
+	if duration := cleanupDuration(input.RequestsCleanupDays, input.RequestsCleanupHours); duration > 0 {
+		cutoff := now.Add(-duration)
 		count, err := w.Ent.Request.Query().Where(
 			request.CreatedAtLT(cutoff),
 			request.Not(request.HasTraceWith(trace.StatusEQ(trace.StatusRetained))),
@@ -738,11 +771,12 @@ func (w *Worker) PreviewCleanup(ctx context.Context, input TriggerGcCleanupInput
 			EstimatedCount: count,
 			CutoffTime:     cutoff,
 			RetentionDays:  input.RequestsCleanupDays,
+			RetentionHours: input.RequestsCleanupHours,
 		})
 	}
 
-	if input.UsageLogsCleanupDays > 0 {
-		cutoff := now.AddDate(0, 0, -input.UsageLogsCleanupDays)
+	if duration := cleanupDuration(input.UsageLogsCleanupDays, input.UsageLogsCleanupHours); duration > 0 {
+		cutoff := now.Add(-duration)
 		count, err := w.Ent.UsageLog.Query().Where(
 			usagelog.CreatedAtLT(cutoff),
 			usagelog.Not(usagelog.HasRequestWith(
@@ -757,34 +791,37 @@ func (w *Worker) PreviewCleanup(ctx context.Context, input TriggerGcCleanupInput
 			EstimatedCount: count,
 			CutoffTime:     cutoff,
 			RetentionDays:  input.UsageLogsCleanupDays,
+			RetentionHours: input.UsageLogsCleanupHours,
 		})
 	}
 
 	bodySpecs := []struct {
 		resourceType string
 		days         int
+		hours        int
 	}{
-		{biz.CleanupResourceRequestBodies, input.RequestBodiesCleanupDays},
-		{biz.CleanupResourceResponseBodies, input.ResponseBodiesCleanupDays},
-		{biz.CleanupResourceResponseChunks, input.ResponseChunksCleanupDays},
+		{biz.CleanupResourceRequestBodies, input.RequestBodiesCleanupDays, input.RequestBodiesCleanupHours},
+		{biz.CleanupResourceResponseBodies, input.ResponseBodiesCleanupDays, input.ResponseBodiesCleanupHours},
+		{biz.CleanupResourceResponseChunks, input.ResponseChunksCleanupDays, input.ResponseChunksCleanupHours},
 	}
-	bodyWindows := make(map[int]GcCleanupPreviewItem, 3)
+	bodyWindows := make(map[time.Duration]GcCleanupPreviewItem, 3)
 
 	for _, spec := range bodySpecs {
-		if spec.days <= 0 {
+		duration := cleanupDuration(spec.days, spec.hours)
+		if duration <= 0 {
 			continue
 		}
 
-		item, ok := bodyWindows[spec.days]
+		item, ok := bodyWindows[duration]
 		if !ok {
 			var err error
 
-			item, err = w.previewBodyCleanup(ctx, spec.resourceType, spec.days, now)
+			item, err = w.previewBodyCleanup(ctx, spec.resourceType, duration, now)
 			if err != nil {
 				return nil, err
 			}
 
-			bodyWindows[spec.days] = item
+			bodyWindows[duration] = item
 		}
 
 		item.ResourceType = spec.resourceType

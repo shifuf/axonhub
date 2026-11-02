@@ -81,7 +81,7 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
   } = useRequestExecutions(
     requestId,
     {
-      first: 10,
+      first: 100,
       orderBy: { field: 'CREATED_AT', direction: 'DESC' },
     },
     { projectId }
@@ -823,6 +823,9 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                 <div className='space-y-6'>
                   {executions.edges.map((edge: any, index: number) => {
                     const execution = edge.node;
+                    const previousExecution = executions.edges[index + 1]?.node;
+                    const isSameChannelRetry = !!previousExecution?.channel?.id && previousExecution.channel.id === execution.channel?.id;
+                    const isChannelFailover = !!previousExecution?.channel?.id && previousExecution.channel.id !== execution.channel?.id;
                     const modelVerdict = getExecutionModelAuditVerdict(execution, t);
                     return (
                       <Card key={execution.id} className='bg-muted/20 border-0 shadow-sm'>
@@ -833,6 +836,15 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                                 {index + 1}
                               </div>
                               {t('requests.dialogs.requestDetail.execution', { index: index + 1 })}
+                              {index > 0 && (
+                                <Badge variant='outline' className='font-normal'>
+                                  {isSameChannelRetry
+                                    ? t('requests.detail.retry.sameChannel')
+                                    : isChannelFailover
+                                      ? t('requests.detail.retry.channelFailover')
+                                      : t('requests.detail.retry.attempt')}
+                                </Badge>
+                              )}
                             </h5>
                             <Badge className={getStatusColor(execution.status)} variant='secondary'>
                               {t(`requests.status.${execution.status}`)}
@@ -912,7 +924,9 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                                 {t('requests.columns.latency')}
                               </span>
                               <p className='text-muted-foreground font-mono text-sm'>
-                                {execution.status === 'completed' || execution.status === 'failed' ? formatLatency(calculateLatency(execution.createdAt, execution.updatedAt)) : '-'}
+                                {execution.status === 'completed' || execution.status === 'failed'
+                                  ? formatLatency(execution.metricsLatencyMs ?? calculateLatency(execution.createdAt, execution.updatedAt))
+                                  : '-'}
                               </p>
                             </div>
                             <div className='bg-background space-y-2 rounded-lg border p-3'>

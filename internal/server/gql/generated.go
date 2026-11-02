@@ -856,6 +856,7 @@ type ComplexityRoot struct {
 		EstimatedCount func(childComplexity int) int
 		ResourceType   func(childComplexity int) int
 		RetentionDays  func(childComplexity int) int
+		RetentionHours func(childComplexity int) int
 	}
 
 	GetCacheDiagnosticsPayload struct {
@@ -1061,6 +1062,7 @@ type ComplexityRoot struct {
 		BulkArchiveModels                     func(childComplexity int, ids []*objects.GUID) int
 		BulkCreateChannels                    func(childComplexity int, input biz.BulkCreateChannelsInput) int
 		BulkCreateModels                      func(childComplexity int, inputs []*ent.CreateModelInput) int
+		BulkDeleteAPIKeys                     func(childComplexity int, ids []*objects.GUID) int
 		BulkDeleteChannels                    func(childComplexity int, ids []*objects.GUID) int
 		BulkDeleteModels                      func(childComplexity int, ids []*objects.GUID) int
 		BulkDeletePromptProtectionRules       func(childComplexity int, ids []*objects.GUID) int
@@ -1100,6 +1102,7 @@ type ComplexityRoot struct {
 		CreatePromptProtectionRule            func(childComplexity int, input ent.CreatePromptProtectionRuleInput) int
 		CreateRole                            func(childComplexity int, input ent.CreateRoleInput) int
 		CreateUser                            func(childComplexity int, input ent.CreateUserInput) int
+		DeleteAPIKey                          func(childComplexity int, id objects.GUID) int
 		DeleteAPIKeyProfileTemplate           func(childComplexity int, id objects.GUID) int
 		DeleteChannel                         func(childComplexity int, id objects.GUID) int
 		DeleteChannelOverrideTemplate         func(childComplexity int, id objects.GUID) int
@@ -1120,6 +1123,7 @@ type ComplexityRoot struct {
 		FreezeChannelModel                    func(childComplexity int, channelID objects.GUID, model string, durationMinutes *int) int
 		LoadAPIKeyProfileTemplate             func(childComplexity int, input LoadAPIKeyProfileTemplateInput) int
 		PreviewPromptProtectionRule           func(childComplexity int, input PromptProtectionRulePreviewInput) int
+		RefreshChannelBalance                 func(childComplexity int, channelID objects.GUID) int
 		RefreshProvidersCatalog               func(childComplexity int) int
 		RemoveUserFromProject                 func(childComplexity int, input RemoveUserFromProjectInput) int
 		ResetChannelQuotaNow                  func(childComplexity int, channelID objects.GUID) int
@@ -1130,10 +1134,12 @@ type ComplexityRoot struct {
 		SaveChannelEndpoints                  func(childComplexity int, input biz.SaveChannelEndpointsInput) int
 		SaveChannelModelPrices                func(childComplexity int, channelID objects.GUID, input []*biz.SaveChannelModelPriceInput) int
 		SaveProxyPreset                       func(childComplexity int, input biz.ProxyPreset) int
+		SetChannelManualBalance               func(childComplexity int, channelID objects.GUID, balanceUsd float64) int
 		SyncChannelModels                     func(childComplexity int, channelID objects.GUID, pattern *string) int
 		TestChannel                           func(childComplexity int, input TestChannelInput) int
 		TestChannelAPIKey                     func(childComplexity int, channelID objects.GUID, key string, modelID *string) int
 		TestChannelAPIKeys                    func(childComplexity int, channelID objects.GUID, modelID *string) int
+		TestChannelBalance                    func(childComplexity int, baseURL string, quotaAPIKey string) int
 		TestChannelQuota                      func(childComplexity int, channelType string, baseURL string, quotaAPIKey string) int
 		TestCodexCatalog                      func(childComplexity int, channelID int) int
 		TriggerAutoBackup                     func(childComplexity int) int
@@ -1933,6 +1939,13 @@ type ComplexityRoot struct {
 		Total        func(childComplexity int) int
 	}
 
+	TestChannelBalancePayload struct {
+		ProviderType func(childComplexity int) int
+		QuotaData    func(childComplexity int) int
+		Ready        func(childComplexity int) int
+		Status       func(childComplexity int) int
+	}
+
 	TestChannelPayload struct {
 		Error   func(childComplexity int) int
 		Latency func(childComplexity int) int
@@ -2366,6 +2379,7 @@ type MutationResolver interface {
 	BulkManageChannelTags(ctx context.Context, ids []*objects.GUID, addTags []string, removeTags []string) (bool, error)
 	TestChannel(ctx context.Context, input TestChannelInput) (*TestChannelPayload, error)
 	TestChannelQuota(ctx context.Context, channelType string, baseURL string, quotaAPIKey string) (*TestChannelQuotaPayload, error)
+	TestChannelBalance(ctx context.Context, baseURL string, quotaAPIKey string) (*TestChannelBalancePayload, error)
 	TestChannelAPIKeys(ctx context.Context, channelID objects.GUID, modelID *string) (*TestChannelAPIKeysPayload, error)
 	TestChannelAPIKey(ctx context.Context, channelID objects.GUID, key string, modelID *string) (*TestAPIKeyResult, error)
 	BulkImportChannels(ctx context.Context, input BulkImportChannelsInput) (*biz.BulkImportChannelsResult, error)
@@ -2386,6 +2400,8 @@ type MutationResolver interface {
 	BulkDisableAPIKeys(ctx context.Context, ids []*objects.GUID) (bool, error)
 	BulkEnableAPIKeys(ctx context.Context, ids []*objects.GUID) (bool, error)
 	BulkArchiveAPIKeys(ctx context.Context, ids []*objects.GUID) (bool, error)
+	DeleteAPIKey(ctx context.Context, id objects.GUID) (bool, error)
+	BulkDeleteAPIKeys(ctx context.Context, ids []*objects.GUID) (bool, error)
 	CreateUser(ctx context.Context, input ent.CreateUserInput) (*ent.User, error)
 	UpdateUser(ctx context.Context, id objects.GUID, input ent.UpdateUserInput) (*ent.User, error)
 	UpdateUserStatus(ctx context.Context, id objects.GUID, status user.Status) (*ent.User, error)
@@ -2444,6 +2460,8 @@ type MutationResolver interface {
 	UpdateSecuritySettings(ctx context.Context, input UpdateSecuritySettingsInput) (bool, error)
 	CheckProviderQuotas(ctx context.Context) (bool, error)
 	ResetChannelQuotaNow(ctx context.Context, channelID objects.GUID) (bool, error)
+	RefreshChannelBalance(ctx context.Context, channelID objects.GUID) (bool, error)
+	SetChannelManualBalance(ctx context.Context, channelID objects.GUID, balanceUsd float64) (bool, error)
 	TriggerGcCleanup(ctx context.Context, input gc.TriggerGcCleanupInput) (bool, error)
 	SaveProxyPreset(ctx context.Context, input biz.ProxyPreset) (bool, error)
 	DeleteProxyPreset(ctx context.Context, url string) (bool, error)
@@ -5574,6 +5592,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.GcCleanupPreviewItem.RetentionDays(childComplexity), true
+	case "GcCleanupPreviewItem.retentionHours":
+		if e.complexity.GcCleanupPreviewItem.RetentionHours == nil {
+			break
+		}
+
+		return e.complexity.GcCleanupPreviewItem.RetentionHours(childComplexity), true
 
 	case "GetCacheDiagnosticsPayload.content":
 		if e.complexity.GetCacheDiagnosticsPayload.Content == nil {
@@ -6366,6 +6390,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Mutation.BulkCreateModels(childComplexity, args["inputs"].([]*ent.CreateModelInput)), true
+	case "Mutation.bulkDeleteAPIKeys":
+		if e.complexity.Mutation.BulkDeleteAPIKeys == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_bulkDeleteAPIKeys_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.BulkDeleteAPIKeys(childComplexity, args["ids"].([]*objects.GUID)), true
 	case "Mutation.bulkDeleteChannels":
 		if e.complexity.Mutation.BulkDeleteChannels == nil {
 			break
@@ -6790,6 +6825,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Mutation.CreateUser(childComplexity, args["input"].(ent.CreateUserInput)), true
+	case "Mutation.deleteAPIKey":
+		if e.complexity.Mutation.DeleteAPIKey == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_deleteAPIKey_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.DeleteAPIKey(childComplexity, args["id"].(objects.GUID)), true
 	case "Mutation.deleteApiKeyProfileTemplate":
 		if e.complexity.Mutation.DeleteAPIKeyProfileTemplate == nil {
 			break
@@ -7010,6 +7056,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Mutation.PreviewPromptProtectionRule(childComplexity, args["input"].(PromptProtectionRulePreviewInput)), true
+	case "Mutation.refreshChannelBalance":
+		if e.complexity.Mutation.RefreshChannelBalance == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_refreshChannelBalance_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.RefreshChannelBalance(childComplexity, args["channelID"].(objects.GUID)), true
 	case "Mutation.refreshProvidersCatalog":
 		if e.complexity.Mutation.RefreshProvidersCatalog == nil {
 			break
@@ -7115,6 +7172,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Mutation.SaveProxyPreset(childComplexity, args["input"].(biz.ProxyPreset)), true
+	case "Mutation.setChannelManualBalance":
+		if e.complexity.Mutation.SetChannelManualBalance == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_setChannelManualBalance_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.SetChannelManualBalance(childComplexity, args["channelID"].(objects.GUID), args["balanceUSD"].(float64)), true
 	case "Mutation.syncChannelModels":
 		if e.complexity.Mutation.SyncChannelModels == nil {
 			break
@@ -7159,6 +7227,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Mutation.TestChannelAPIKeys(childComplexity, args["channelID"].(objects.GUID), args["modelID"].(*string)), true
+	case "Mutation.testChannelBalance":
+		if e.complexity.Mutation.TestChannelBalance == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_testChannelBalance_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Mutation.TestChannelBalance(childComplexity, args["baseURL"].(string), args["quotaApiKey"].(string)), true
 	case "Mutation.testChannelQuota":
 		if e.complexity.Mutation.TestChannelQuota == nil {
 			break
@@ -10972,6 +11051,31 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.complexity.TestChannelAPIKeysPayload.Total(childComplexity), true
 
+	case "TestChannelBalancePayload.providerType":
+		if e.complexity.TestChannelBalancePayload.ProviderType == nil {
+			break
+		}
+
+		return e.complexity.TestChannelBalancePayload.ProviderType(childComplexity), true
+	case "TestChannelBalancePayload.quotaData":
+		if e.complexity.TestChannelBalancePayload.QuotaData == nil {
+			break
+		}
+
+		return e.complexity.TestChannelBalancePayload.QuotaData(childComplexity), true
+	case "TestChannelBalancePayload.ready":
+		if e.complexity.TestChannelBalancePayload.Ready == nil {
+			break
+		}
+
+		return e.complexity.TestChannelBalancePayload.Ready(childComplexity), true
+	case "TestChannelBalancePayload.status":
+		if e.complexity.TestChannelBalancePayload.Status == nil {
+			break
+		}
+
+		return e.complexity.TestChannelBalancePayload.Status(childComplexity), true
+
 	case "TestChannelPayload.error":
 		if e.complexity.TestChannelPayload.Error == nil {
 			break
@@ -13089,6 +13193,17 @@ func (ec *executionContext) field_Mutation_bulkCreateModels_args(ctx context.Con
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_bulkDeleteAPIKeys_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "ids", ec.unmarshalNID2ᚕᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐGUIDᚄ)
+	if err != nil {
+		return nil, err
+	}
+	args["ids"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_bulkDeleteChannels_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -13532,6 +13647,17 @@ func (ec *executionContext) field_Mutation_createUser_args(ctx context.Context, 
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_deleteAPIKey_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐGUID)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_deleteApiKeyProfileTemplate_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -13787,6 +13913,17 @@ func (ec *executionContext) field_Mutation_previewPromptProtectionRule_args(ctx 
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_refreshChannelBalance_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "channelID", ec.unmarshalNID2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐGUID)
+	if err != nil {
+		return nil, err
+	}
+	args["channelID"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_removeUserFromProject_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -13896,6 +14033,22 @@ func (ec *executionContext) field_Mutation_saveProxyPreset_args(ctx context.Cont
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_setChannelManualBalance_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "channelID", ec.unmarshalNID2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐGUID)
+	if err != nil {
+		return nil, err
+	}
+	args["channelID"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "balanceUSD", ec.unmarshalNFloat2float64)
+	if err != nil {
+		return nil, err
+	}
+	args["balanceUSD"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_syncChannelModels_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -13946,6 +14099,22 @@ func (ec *executionContext) field_Mutation_testChannelAPIKeys_args(ctx context.C
 		return nil, err
 	}
 	args["modelID"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_testChannelBalance_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "baseURL", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["baseURL"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "quotaApiKey", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["quotaApiKey"] = arg1
 	return args, nil
 }
 
@@ -31453,6 +31622,35 @@ func (ec *executionContext) fieldContext_GcCleanupPreviewItem_retentionDays(_ co
 	return fc, nil
 }
 
+func (ec *executionContext) _GcCleanupPreviewItem_retentionHours(ctx context.Context, field graphql.CollectedField, obj *gc.GcCleanupPreviewItem) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_GcCleanupPreviewItem_retentionHours,
+		func(ctx context.Context) (any, error) {
+			return obj.RetentionHours, nil
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_GcCleanupPreviewItem_retentionHours(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "GcCleanupPreviewItem",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _GetCacheDiagnosticsPayload_fileName(ctx context.Context, field graphql.CollectedField, obj *GetCacheDiagnosticsPayload) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -36179,6 +36377,57 @@ func (ec *executionContext) fieldContext_Mutation_testChannelQuota(ctx context.C
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_testChannelBalance(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_testChannelBalance,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Mutation().TestChannelBalance(ctx, fc.Args["baseURL"].(string), fc.Args["quotaApiKey"].(string))
+		},
+		nil,
+		ec.marshalNTestChannelBalancePayload2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐTestChannelBalancePayload,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_testChannelBalance(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "providerType":
+				return ec.fieldContext_TestChannelBalancePayload_providerType(ctx, field)
+			case "status":
+				return ec.fieldContext_TestChannelBalancePayload_status(ctx, field)
+			case "ready":
+				return ec.fieldContext_TestChannelBalancePayload_ready(ctx, field)
+			case "quotaData":
+				return ec.fieldContext_TestChannelBalancePayload_quotaData(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type TestChannelBalancePayload", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_testChannelBalance_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Mutation_testChannelAPIKeys(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -37211,6 +37460,88 @@ func (ec *executionContext) fieldContext_Mutation_bulkArchiveAPIKeys(ctx context
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_bulkArchiveAPIKeys_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_deleteAPIKey(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_deleteAPIKey,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Mutation().DeleteAPIKey(ctx, fc.Args["id"].(objects.GUID))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_deleteAPIKey(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_deleteAPIKey_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_bulkDeleteAPIKeys(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_bulkDeleteAPIKeys,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Mutation().BulkDeleteAPIKeys(ctx, fc.Args["ids"].([]*objects.GUID))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_bulkDeleteAPIKeys(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_bulkDeleteAPIKeys_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -40179,6 +40510,88 @@ func (ec *executionContext) fieldContext_Mutation_resetChannelQuotaNow(ctx conte
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_resetChannelQuotaNow_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_refreshChannelBalance(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_refreshChannelBalance,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Mutation().RefreshChannelBalance(ctx, fc.Args["channelID"].(objects.GUID))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_refreshChannelBalance(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_refreshChannelBalance_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_setChannelManualBalance(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_setChannelManualBalance,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Mutation().SetChannelManualBalance(ctx, fc.Args["channelID"].(objects.GUID), fc.Args["balanceUSD"].(float64))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_setChannelManualBalance(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_setChannelManualBalance_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -49889,6 +50302,8 @@ func (ec *executionContext) fieldContext_Query_previewGcCleanup(ctx context.Cont
 				return ec.fieldContext_GcCleanupPreviewItem_cutoffTime(ctx, field)
 			case "retentionDays":
 				return ec.fieldContext_GcCleanupPreviewItem_retentionDays(ctx, field)
+			case "retentionHours":
+				return ec.fieldContext_GcCleanupPreviewItem_retentionHours(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GcCleanupPreviewItem", field.Name)
 		},
@@ -58940,6 +59355,122 @@ func (ec *executionContext) fieldContext_TestChannelAPIKeysPayload_results(_ con
 				return ec.fieldContext_TestAPIKeyResult_disabled(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type TestAPIKeyResult", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TestChannelBalancePayload_providerType(ctx context.Context, field graphql.CollectedField, obj *TestChannelBalancePayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelBalancePayload_providerType,
+		func(ctx context.Context) (any, error) {
+			return obj.ProviderType, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelBalancePayload_providerType(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelBalancePayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TestChannelBalancePayload_status(ctx context.Context, field graphql.CollectedField, obj *TestChannelBalancePayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelBalancePayload_status,
+		func(ctx context.Context) (any, error) {
+			return obj.Status, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelBalancePayload_status(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelBalancePayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TestChannelBalancePayload_ready(ctx context.Context, field graphql.CollectedField, obj *TestChannelBalancePayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelBalancePayload_ready,
+		func(ctx context.Context) (any, error) {
+			return obj.Ready, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelBalancePayload_ready(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelBalancePayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TestChannelBalancePayload_quotaData(ctx context.Context, field graphql.CollectedField, obj *TestChannelBalancePayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_TestChannelBalancePayload_quotaData,
+		func(ctx context.Context) (any, error) {
+			return obj.QuotaData, nil
+		},
+		nil,
+		ec.marshalNJSONRawMessage2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐJSONRawMessage,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_TestChannelBalancePayload_quotaData(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TestChannelBalancePayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type JSONRawMessage does not have child fields")
 		},
 	}
 	return fc, nil
@@ -89060,7 +89591,7 @@ func (ec *executionContext) unmarshalInputTriggerGcCleanupInput(ctx context.Cont
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"requestsCleanupDays", "usageLogsCleanupDays", "requestBodiesCleanupDays", "responseBodiesCleanupDays", "responseChunksCleanupDays"}
+	fieldsInOrder := [...]string{"requestsCleanupDays", "usageLogsCleanupDays", "requestBodiesCleanupDays", "responseBodiesCleanupDays", "responseChunksCleanupDays", "requestsCleanupHours", "usageLogsCleanupHours", "requestBodiesCleanupHours", "responseBodiesCleanupHours", "responseChunksCleanupHours"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -89102,6 +89633,41 @@ func (ec *executionContext) unmarshalInputTriggerGcCleanupInput(ctx context.Cont
 				return it, err
 			}
 			it.ResponseChunksCleanupDays = data
+		case "requestsCleanupHours":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("requestsCleanupHours"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.RequestsCleanupHours = data
+		case "usageLogsCleanupHours":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("usageLogsCleanupHours"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.UsageLogsCleanupHours = data
+		case "requestBodiesCleanupHours":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("requestBodiesCleanupHours"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.RequestBodiesCleanupHours = data
+		case "responseBodiesCleanupHours":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("responseBodiesCleanupHours"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ResponseBodiesCleanupHours = data
+		case "responseChunksCleanupHours":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("responseChunksCleanupHours"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ResponseChunksCleanupHours = data
 		}
 	}
 
@@ -102209,6 +102775,11 @@ func (ec *executionContext) _GcCleanupPreviewItem(ctx context.Context, sel ast.S
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "retentionHours":
+			out.Values[i] = ec._GcCleanupPreviewItem_retentionHours(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -103840,6 +104411,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "testChannelBalance":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_testChannelBalance(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "testChannelAPIKeys":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_testChannelAPIKeys(ctx, field)
@@ -103976,6 +104554,20 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "bulkArchiveAPIKeys":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_bulkArchiveAPIKeys(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "deleteAPIKey":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_deleteAPIKey(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "bulkDeleteAPIKeys":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_bulkDeleteAPIKeys(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -104382,6 +104974,20 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "resetChannelQuotaNow":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_resetChannelQuotaNow(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "refreshChannelBalance":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_refreshChannelBalance(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "setChannelManualBalance":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_setChannelManualBalance(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -112921,6 +113527,60 @@ func (ec *executionContext) _TestChannelAPIKeysPayload(ctx context.Context, sel 
 			}
 		case "results":
 			out.Values[i] = ec._TestChannelAPIKeysPayload_results(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var testChannelBalancePayloadImplementors = []string{"TestChannelBalancePayload"}
+
+func (ec *executionContext) _TestChannelBalancePayload(ctx context.Context, sel ast.SelectionSet, obj *TestChannelBalancePayload) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, testChannelBalancePayloadImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("TestChannelBalancePayload")
+		case "providerType":
+			out.Values[i] = ec._TestChannelBalancePayload_providerType(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "status":
+			out.Values[i] = ec._TestChannelBalancePayload_status(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "ready":
+			out.Values[i] = ec._TestChannelBalancePayload_ready(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "quotaData":
+			out.Values[i] = ec._TestChannelBalancePayload_quotaData(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -122556,6 +123216,20 @@ func (ec *executionContext) marshalNTestChannelAPIKeysPayload2ᚖgithubᚗcomᚋ
 		return graphql.Null
 	}
 	return ec._TestChannelAPIKeysPayload(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNTestChannelBalancePayload2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐTestChannelBalancePayload(ctx context.Context, sel ast.SelectionSet, v TestChannelBalancePayload) graphql.Marshaler {
+	return ec._TestChannelBalancePayload(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNTestChannelBalancePayload2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐTestChannelBalancePayload(ctx context.Context, sel ast.SelectionSet, v *TestChannelBalancePayload) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._TestChannelBalancePayload(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNTestChannelInput2githubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐTestChannelInput(ctx context.Context, v any) (TestChannelInput, error) {

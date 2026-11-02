@@ -292,6 +292,15 @@ func TestWorker_cleanupWithZeroDays(t *testing.T) {
 	}
 }
 
+func TestCleanupDurationHoursTakePrecedence(t *testing.T) {
+	if got := cleanupDuration(7, 6); got != 6*time.Hour {
+		t.Fatalf("expected hour precision to take precedence, got %s", got)
+	}
+	if got := cleanupDuration(7, 0); got != 7*24*time.Hour {
+		t.Fatalf("expected day precision fallback, got %s", got)
+	}
+}
+
 func TestWorker_cleanupChannelProbesDeletesInBatches(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=1")
 	t.Cleanup(func() {

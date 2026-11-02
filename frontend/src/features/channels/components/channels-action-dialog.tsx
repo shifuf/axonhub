@@ -39,7 +39,7 @@ import {
   useAllChannelNames,
   useAllChannelTags,
   useSyncChannelModels,
-  useTestChannelQuota,
+  useTestChannelBalance,
 } from '../data/channels';
 import { claudecodeOAuthExchange, claudecodeOAuthStart } from '../data/claudecode';
 import { codexDecodeAuthJSON, codexOAuthExchange, codexOAuthStart } from '../data/codex';
@@ -691,7 +691,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const isDuplicate = !!duplicateFromRow && !isEdit;
   const initialRow: Channel | undefined = currentRow || duplicateFromRow;
   const createChannel = useCreateChannel();
-  const testChannelQuota = useTestChannelQuota();
+  const testChannelBalance = useTestChannelBalance();
   const duplicateChannel = useDuplicateChannel();
   const updateChannelSettings = useUpdateChannelSettings();
   const fetchModels = useFetchModels();
@@ -1181,24 +1181,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const isCopilotType = activeChannelType === 'github_copilot';
   const isXAISubscriptionType = activeChannelType === 'xai_subscription';
   const isZenmuxType = ['zenmux', 'zenmux_responses', 'zenmux_anthropic', 'zenmux_gemini', 'zenmux_video'].includes(activeChannelType);
-  const supportsQuotaAPIKey = [
-    'nanogpt',
-    'nanogpt_responses',
-    'cline',
-    'minimax',
-    'minimax_anthropic',
-    'zhipu',
-    'zhipu_anthropic',
-    'zai',
-    'zai_anthropic',
-    'opencode_go',
-    'opencode_go_anthropic',
-    'moonshot_coding',
-    'openai',
-    'openai_responses',
-    'deepseek',
-    'deepseek_anthropic',
-  ].includes(activeChannelType);
+  const showBalanceToken = true;
   const isCommandCodeType = activeChannelType === 'commandcode' || activeChannelType === 'commandcode_anthropic';
   const isOllamaType = activeChannelType === 'ollama' || activeChannelType === 'ollama_anthropic';
 
@@ -1728,7 +1711,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           ? getCodexThirdPartySubmitCredentials(
               {
                 ...credentials,
-                quotaApiKey: supportsQuotaAPIKey ? credentials.quotaApiKey?.trim() || undefined : undefined,
+                quotaApiKey: credentials.quotaApiKey?.trim() || undefined,
               },
               {
                 type: valuesForSubmit.type,
@@ -3116,7 +3099,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                         />
                       )}
 
-                      {supportsQuotaAPIKey && (
+                      {showBalanceToken && (
                         <FormField
                           control={form.control}
                           name='credentials.quotaApiKey'
@@ -3140,12 +3123,11 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                   type='button'
                                   size='sm'
                                   variant='outline'
-                                  disabled={testChannelQuota.isPending || !form.watch('credentials.quotaApiKey')?.trim()}
+                                  disabled={testChannelBalance.isPending || !form.watch('credentials.quotaApiKey')?.trim()}
                                   onClick={async () => {
                                     setQuotaTestResult(null);
                                     try {
-                                      const result = await testChannelQuota.mutateAsync({
-                                        channelType: activeChannelType,
+                                      const result = await testChannelBalance.mutateAsync({
                                         baseURL: form.getValues('baseURL'),
                                         quotaApiKey: form.getValues('credentials.quotaApiKey') || '',
                                       });
@@ -3156,7 +3138,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                     }
                                   }}
                                 >
-                                  {testChannelQuota.isPending
+                                  {testChannelBalance.isPending
                                     ? t('common.buttons.processing')
                                     : t('channels.dialogs.fields.quotaApiKey.test')}
                                 </Button>

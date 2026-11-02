@@ -250,6 +250,18 @@ const BULK_ARCHIVE_APIKEYS_MUTATION = `
   }
 `;
 
+const DELETE_APIKEY_MUTATION = `
+  mutation DeleteAPIKey($id: ID!) {
+    deleteAPIKey(id: $id)
+  }
+`;
+
+const BULK_DELETE_APIKEYS_MUTATION = `
+  mutation BulkDeleteAPIKeys($ids: [ID!]!) {
+    bulkDeleteAPIKeys(ids: $ids)
+  }
+`;
+
 const ROTATE_APIKEY_MUTATION = `
   mutation RotateAPIKey($id: ID!) {
     rotateAPIKey(id: $id) {
@@ -829,6 +841,46 @@ export function useBulkArchiveApiKeys() {
     onError: (error) => {
       handleError(error);
     },
+  });
+}
+
+export function useDeleteApiKey() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const selectedProjectId = useSelectedProjectId();
+  const { handleError } = useErrorHandler();
+
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const headers = selectedProjectId ? { 'X-Project-ID': selectedProjectId } : undefined;
+      const data = await graphqlRequest<{ deleteAPIKey: boolean }>(DELETE_APIKEY_MUTATION, { id }, headers);
+      return data.deleteAPIKey;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] });
+      toast.success(t('apikeys.messages.deleteSuccess'));
+    },
+    onError: (error) => handleError(error),
+  });
+}
+
+export function useBulkDeleteApiKeys() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const selectedProjectId = useSelectedProjectId();
+  const { handleError } = useErrorHandler();
+
+  return useMutation({
+    mutationFn: async (ids: string[]) => {
+      const headers = selectedProjectId ? { 'X-Project-ID': selectedProjectId } : undefined;
+      const data = await graphqlRequest<{ bulkDeleteAPIKeys: boolean }>(BULK_DELETE_APIKEYS_MUTATION, { ids }, headers);
+      return data.bulkDeleteAPIKeys;
+    },
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] });
+      toast.success(t('apikeys.messages.bulkDeleteSuccess', { count: variables.length }));
+    },
+    onError: (error) => handleError(error),
   });
 }
 

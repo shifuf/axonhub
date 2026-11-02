@@ -474,6 +474,13 @@ type TestChannelQuotaPayload {
   quotaData: JSONRawMessage!
 }
 
+type TestChannelBalancePayload {
+  providerType: String!
+  status: String!
+  ready: Boolean!
+  quotaData: JSONRawMessage!
+}
+
 type TestAPIKeyResult {
   keyPrefix: String!
   success: Boolean!
@@ -1040,6 +1047,7 @@ type Mutation {
   bulkManageChannelTags(ids: [ID!]!, addTags: [String!]!, removeTags: [String!]!): Boolean!
   testChannel(input: TestChannelInput!): TestChannelPayload!
   testChannelQuota(channelType: String!, baseURL: String!, quotaApiKey: String!): TestChannelQuotaPayload!
+  testChannelBalance(baseURL: String!, quotaApiKey: String!): TestChannelBalancePayload!
   testChannelAPIKeys(channelID: ID!, modelID: String): TestChannelAPIKeysPayload!
   testChannelAPIKey(channelID: ID!, key: String!, modelID: String): TestAPIKeyResult!
   bulkImportChannels(input: BulkImportChannelsInput!): BulkImportChannelsResult!
@@ -1070,6 +1078,8 @@ type Mutation {
   bulkDisableAPIKeys(ids: [ID!]!): Boolean!
   bulkEnableAPIKeys(ids: [ID!]!): Boolean!
   bulkArchiveAPIKeys(ids: [ID!]!): Boolean!
+  deleteAPIKey(id: ID!): Boolean!
+  bulkDeleteAPIKeys(ids: [ID!]!): Boolean!
 
   createUser(input: CreateUserInput!): User!
   updateUser(id: ID!, input: UpdateUserInput!): User!

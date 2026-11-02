@@ -40,6 +40,76 @@ func TestCompatibleQuotaChecker_NewAPI(t *testing.T) {
 	require.InDelta(t, 0.25, quota.Limits[0].UsageRatio, 1e-9)
 }
 
+func TestCompatibleQuotaChecker_NewAPIAccountBalance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			http.Error(w, `{"message":"Invalid token","success":false}`, http.StatusUnauthorized)
+		case "/api/user/self":
+			require.Equal(t, "Bearer temporary-token", r.Header.Get("Authorization"))
+			writeCompatibleJSON(t, w, map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"quota":      "776903515",
+					"used_quota": "134872775",
+				},
+			})
+		case "/api/status":
+			writeCompatibleJSON(t, w, map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"quota_per_unit":                500000,
+					"quota_display_type":            "USD",
+					"custom_currency_exchange_rate": 1,
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	quota, err := NewCompatibleQuotaChecker(httpclient.NewHttpClient()).CheckStandaloneBalance(t.Context(), server.URL, "temporary-token")
+
+	require.NoError(t, err)
+	require.Equal(t, compatibleSourceNewAPI, quota.RawData["source"])
+	require.InDelta(t, 1553.80703, quota.RawData["balance_usd"], 1e-9)
+	require.InDelta(t, 1553.80703, quota.RawData["total_available_usd"], 1e-9)
+	require.InDelta(t, 776903515.0, quota.RawData["quota_remaining"], 1e-9)
+	require.Equal(t, "USD", quota.RawData["display_currency"])
+	require.Equal(t, "available", quota.Status)
+}
+
+func TestCompatibleQuotaChecker_NewAPICurrencyBasisConvertsToUSD(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			http.NotFound(w, r)
+		case "/api/user/self":
+			writeCompatibleJSON(t, w, map[string]any{
+				"data": map[string]any{"quota": 1_000_000},
+			})
+		case "/api/status":
+			writeCompatibleJSON(t, w, map[string]any{
+				"data": map[string]any{
+					"quota_per_unit":     500000,
+					"quota_display_type": "CNY",
+					"usd_exchange_rate":  7.3,
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	quota, err := NewCompatibleQuotaChecker(httpclient.NewHttpClient()).CheckStandaloneBalance(t.Context(), server.URL, "temporary-token")
+
+	require.NoError(t, err)
+	require.InDelta(t, 2.0/7.3, quota.RawData["balance_usd"], 1e-9)
+	require.Equal(t, "CNY", quota.RawData["display_currency"])
+}
+
 func TestCompatibleQuotaChecker_FallsBackToSub2API(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -67,6 +137,35 @@ func TestCompatibleQuotaChecker_FallsBackToSub2API(t *testing.T) {
 	require.Equal(t, compatibleSourceSub2API, quota.RawData["source"])
 	require.InDelta(t, 12.5, quota.RawData["balance_usd"], 1e-9)
 	require.InDelta(t, 0.75, quota.RawData["today_cost_usd"], 1e-9)
+	require.Equal(t, "available", quota.Status)
+}
+
+func TestCompatibleQuotaChecker_Sub2APIAccountBalance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/usage/token/":
+			http.NotFound(w, r)
+		case "/api/v1/auth/me":
+			require.Equal(t, "Bearer temporary-token", r.Header.Get("Authorization"))
+			writeCompatibleJSON(t, w, map[string]any{
+				"code":    0,
+				"message": "success",
+				"data": map[string]any{
+					"id":      42,
+					"balance": "18.75",
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	quota, err := NewCompatibleQuotaChecker(httpclient.NewHttpClient()).CheckQuota(t.Context(), compatibleTestChannel(t, server.URL))
+
+	require.NoError(t, err)
+	require.Equal(t, compatibleSourceSub2API, quota.RawData["source"])
+	require.InDelta(t, 18.75, quota.RawData["balance_usd"], 1e-9)
 	require.Equal(t, "available", quota.Status)
 }
 

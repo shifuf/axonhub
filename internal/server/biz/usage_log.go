@@ -21,12 +21,17 @@ import (
 type UsageLogService struct {
 	*AbstractService
 
-	SystemService  *SystemService
-	ChannelService *ChannelService
+	SystemService        *SystemService
+	ChannelService       *ChannelService
+	providerQuotaService *ProviderQuotaService
 
 	// OnUsageLogCreated is called after a usage log is successfully created.
 	// Used to invalidate caches that depend on usage log data.
 	OnUsageLogCreated func()
+}
+
+func (s *UsageLogService) SetProviderQuotaService(service *ProviderQuotaService) {
+	s.providerQuotaService = service
 }
 
 func (s *UsageLogService) computeUsageCost(ctx context.Context, channelID int, modelID string, usage *llm.Usage) ([]objects.CostItem, *float64, string) {
@@ -205,6 +210,11 @@ func (s *UsageLogService) CreateUsageLog(ctx context.Context, params CreateUsage
 
 	if s.OnUsageLogCreated != nil {
 		s.OnUsageLogCreated()
+	}
+	if s.providerQuotaService != nil && usageLog.TotalCost != nil {
+		if err := s.providerQuotaService.RecordUsageCost(ctx, params.ChannelID, *usageLog.TotalCost); err != nil {
+			log.Warn(ctx, "failed to deduct channel balance", log.Int("channel_id", params.ChannelID), log.Cause(err))
+		}
 	}
 
 	return usageLog, nil

@@ -37,7 +37,8 @@ type ChannelsDialogType =
   | 'keyManagement'
   | 'disabledAPIKeys'
   | 'modelCooldowns'
-  | 'endpoints';
+  | 'endpoints'
+  | 'balance';
 
 interface ChannelsContextType {
   open: ChannelsDialogType | null;

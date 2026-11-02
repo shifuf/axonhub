@@ -66,7 +66,7 @@ test('a copied OAuth row switched to third-party submits no OAuth JSON and keeps
   assert.match(submit, /const valuesForSubmit = isEdit/);
   assert.match(
     submit,
-    /credentials:\s*credentials\s*\n\s*\? getCodexThirdPartySubmitCredentials\(\s*\{[\s\S]*?quotaApiKey: supportsQuotaAPIKey \? credentials\.quotaApiKey\?\.trim\(\)/
+    /credentials:\s*credentials\s*\n\s*\? getCodexThirdPartySubmitCredentials\(\s*\{[\s\S]*?quotaApiKey: credentials\.quotaApiKey\?\.trim\(\)/
   );
   assert.match(submit, /type: valuesForSubmit\.type,/);
 });

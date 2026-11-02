@@ -32,23 +32,35 @@ const (
 )
 
 func (w *Worker) cleanupRequestBodies(ctx context.Context, cleanupDays int) error {
-	return w.cleanupBodyPayloads(ctx, bodyPayloadRequest, cleanupDays)
+	return w.cleanupRequestBodiesDuration(ctx, time.Duration(cleanupDays)*24*time.Hour)
+}
+
+func (w *Worker) cleanupRequestBodiesDuration(ctx context.Context, cleanupDuration time.Duration) error {
+	return w.cleanupBodyPayloadsDuration(ctx, bodyPayloadRequest, cleanupDuration)
 }
 
 func (w *Worker) cleanupResponseBodies(ctx context.Context, cleanupDays int) error {
-	return w.cleanupBodyPayloads(ctx, bodyPayloadResponse, cleanupDays)
+	return w.cleanupResponseBodiesDuration(ctx, time.Duration(cleanupDays)*24*time.Hour)
+}
+
+func (w *Worker) cleanupResponseBodiesDuration(ctx context.Context, cleanupDuration time.Duration) error {
+	return w.cleanupBodyPayloadsDuration(ctx, bodyPayloadResponse, cleanupDuration)
 }
 
 func (w *Worker) cleanupResponseChunks(ctx context.Context, cleanupDays int) error {
-	return w.cleanupBodyPayloads(ctx, bodyPayloadChunks, cleanupDays)
+	return w.cleanupResponseChunksDuration(ctx, time.Duration(cleanupDays)*24*time.Hour)
 }
 
-func (w *Worker) cleanupBodyPayloads(ctx context.Context, kind bodyPayloadKind, cleanupDays int) error {
-	if cleanupDays <= 0 {
+func (w *Worker) cleanupResponseChunksDuration(ctx context.Context, cleanupDuration time.Duration) error {
+	return w.cleanupBodyPayloadsDuration(ctx, bodyPayloadChunks, cleanupDuration)
+}
+
+func (w *Worker) cleanupBodyPayloadsDuration(ctx context.Context, kind bodyPayloadKind, cleanupDuration time.Duration) error {
+	if cleanupDuration <= 0 {
 		return nil
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -cleanupDays)
+	cutoff := time.Now().Add(-cleanupDuration)
 
 	primaryID, err := w.primaryStorageID(ctx)
 	if err != nil {
@@ -68,11 +80,11 @@ func (w *Worker) cleanupBodyPayloads(ctx context.Context, kind bodyPayloadKind, 
 	return errors.Join(reqErr, execErr)
 }
 
-func (w *Worker) previewBodyCleanup(ctx context.Context, resourceType string, days int, now time.Time) (GcCleanupPreviewItem, error) {
+func (w *Worker) previewBodyCleanup(ctx context.Context, resourceType string, cleanupDuration time.Duration, now time.Time) (GcCleanupPreviewItem, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	cutoff := now.AddDate(0, 0, -days)
+	cutoff := now.Add(-cleanupDuration)
 
 	// Preview must not inspect JSON/TOAST columns. CAST(jsonb AS TEXT) on a
 	// multi-GB body table blocks the admin dialog until the proxy times out.
@@ -104,7 +116,8 @@ func (w *Worker) previewBodyCleanup(ctx context.Context, resourceType string, da
 		ResourceType:   resourceType,
 		EstimatedCount: reqCount + execCount,
 		CutoffTime:     cutoff,
-		RetentionDays:  days,
+		RetentionDays:  int(cleanupDuration / (24 * time.Hour)),
+		RetentionHours: int(cleanupDuration / time.Hour),
 	}, nil
 }
 

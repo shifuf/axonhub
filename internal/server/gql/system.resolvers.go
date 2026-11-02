@@ -298,6 +298,35 @@ func (r *mutationResolver) ResetChannelQuotaNow(ctx context.Context, channelID o
 	return true, nil
 }
 
+// RefreshChannelBalance refreshes the standalone New API/Sub2API balance for
+// the channel's dedicated quota token.
+func (r *mutationResolver) RefreshChannelBalance(ctx context.Context, channelID objects.GUID) (bool, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return false, fmt.Errorf("permission denied: requires write:channels scope")
+	}
+	if r.providerQuotaService == nil {
+		return false, fmt.Errorf("provider quota service is not available")
+	}
+	if err := r.providerQuotaService.RefreshChannelBalance(ctx, channelID.ID); err != nil {
+		return false, fmt.Errorf("failed to refresh channel balance: %w", err)
+	}
+	return true, nil
+}
+
+// SetChannelManualBalance stores a locally managed USD balance for a channel.
+func (r *mutationResolver) SetChannelManualBalance(ctx context.Context, channelID objects.GUID, balanceUsd float64) (bool, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return false, fmt.Errorf("permission denied: requires write:channels scope")
+	}
+	if r.providerQuotaService == nil {
+		return false, fmt.Errorf("provider quota service is not available")
+	}
+	if err := r.providerQuotaService.SetChannelManualBalance(ctx, channelID.ID, balanceUsd); err != nil {
+		return false, fmt.Errorf("failed to set channel manual balance: %w", err)
+	}
+	return true, nil
+}
+
 // TriggerGcCleanup is the resolver for the triggerGcCleanup field.
 func (r *mutationResolver) TriggerGcCleanup(ctx context.Context, input gc.TriggerGcCleanupInput) (bool, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteSettings) {

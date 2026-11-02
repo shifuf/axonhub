@@ -173,8 +173,12 @@
   "requests.cleanup.retention.options.30": "30 天前",
   "requests.cleanup.retention.options.90": "90 天前",
   "requests.cleanup.retention.custom": "自定义天数",
+  "requests.cleanup.retention.customHours": "自定义小时数",
+  "requests.cleanup.retention.options.hours": "早于 {{hours}} 小时",
   "requests.cleanup.retention.days": "天",
+  "requests.cleanup.retention.hours": "小时",
   "requests.cleanup.retention.hint": "只删除早于 {{days}} 天的记录，更新的日志不受影响。",
+  "requests.cleanup.retention.hoursHint": "只删除早于 {{hours}} 小时的记录，更新的日志不受影响。",
   "requests.cleanup.targets.label": "清理范围",
   "requests.cleanup.targets.requests": "请求日志",
   "requests.cleanup.targets.requestsHint": "同时删除对应的执行记录、追踪与线程。",
@@ -195,5 +199,8 @@
   "requests.cleanup.confirm": "立即清理",
   "requests.cleanup.success": "已开始清理",
   "requests.cleanup.failed": "启动清理失败",
-  "requests.cleanup.errorNoTarget": "请至少选择一项要清理的内容"
+  "requests.cleanup.errorNoTarget": "请至少选择一项要清理的内容",
+  "requests.detail.retry.sameChannel": "同渠道重试",
+  "requests.detail.retry.channelFailover": "切换渠道",
+  "requests.detail.retry.attempt": "重试尝试"
 }

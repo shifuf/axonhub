@@ -1,7 +1,7 @@
 import React from 'react';
 import { DotsHorizontalIcon } from '@radix-ui/react-icons';
 import { Row } from '@tanstack/react-table';
-import { IconUserOff, IconUserCheck, IconEdit, IconSettings, IconArchive, IconCheck, IconRefresh } from '@tabler/icons-react';
+import { IconUserOff, IconUserCheck, IconEdit, IconSettings, IconArchive, IconCheck, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { BarChart3 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { usePermissions } from '@/hooks/usePermissions';
@@ -71,6 +71,11 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     setTimeout(() => openDialog('rotate', apiKey), 0);
   };
 
+  const handleDelete = (apiKey: ApiKey) => {
+    setOpen(false);
+    setTimeout(() => openDialog('delete', apiKey), 0);
+  };
+
   return (
     <>
       <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -121,6 +126,10 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
                 {apiKey.status === 'archived' ? t('common.buttons.restore') : t('common.buttons.archive')}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => handleDelete(apiKey)} className='text-red-600'>
+                <IconTrash className='mr-2 h-4 w-4' />
+                {t('common.buttons.delete')}
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={() => handleRotate(apiKey)}>
                 <IconRefresh className='mr-2 h-4 w-4' />
                 {t('apikeys.dialogs.rotate.title')}

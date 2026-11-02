@@ -1104,6 +1104,58 @@ func (s *APIKeyService) BulkArchiveAPIKeys(ctx context.Context, ids []int) error
 	return s.bulkUpdateAPIKeyStatus(ctx, ids, apikey.StatusArchived, "archive")
 }
 
+// DeleteAPIKey permanently removes one API key after applying the same
+// ownership and protected-key checks as bulk API key operations.
+func (s *APIKeyService) DeleteAPIKey(ctx context.Context, id int) error {
+	return s.BulkDeleteAPIKeys(ctx, []int{id})
+}
+
+// BulkDeleteAPIKeys permanently removes API keys from storage. Archived keys
+// are eligible for deletion, while the reserved no-auth key is protected.
+func (s *APIKeyService) BulkDeleteAPIKeys(ctx context.Context, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	client := s.entFromContext(ctx)
+	apiKeys, err := client.APIKey.Query().Where(apikey.IDIn(ids...)).All(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to query API keys for deletion: %w", err)
+	}
+	if len(apiKeys) != len(ids) {
+		return fmt.Errorf("expected to find %d API keys, but found %d", len(ids), len(apiKeys))
+	}
+
+	for _, apiKey := range apiKeys {
+		if apiKey.Type == apikey.TypeNoauth {
+			return fmt.Errorf("noauth type API key cannot be deleted")
+		}
+	}
+
+	personalKeys := lo.Filter(apiKeys, func(apiKey *ent.APIKey, _ int) bool {
+		return apiKey.Type == apikey.TypePersonal
+	})
+	if len(personalKeys) > 0 {
+		user, ok := contexts.GetUser(ctx)
+		if !ok {
+			return fmt.Errorf("user not found in context")
+		}
+		for _, apiKey := range personalKeys {
+			if apiKey.UserID != user.ID && !user.IsOwner {
+				return fmt.Errorf("personal API key %q can only be deleted by its creator or a system owner", apiKey.Name)
+			}
+		}
+	}
+
+	keys := lo.Map(apiKeys, func(apiKey *ent.APIKey, _ int) string { return apiKey.Key })
+	if _, err := client.APIKey.Delete().Where(apikey.IDIn(ids...)).Exec(schematype.SkipSoftDelete(ctx)); err != nil {
+		return fmt.Errorf("failed to delete API keys: %w", err)
+	}
+
+	s.invalidateAPIKeyCaches(ctx, keys...)
+	return nil
+}
+
 // RotateAPIKey rotates an API key by generating a new key value while preserving all other properties.
 // This is useful when a key is compromised or when an employee leaves, without losing usage statistics.
 func (s *APIKeyService) RotateAPIKey(ctx context.Context, id int) (*ent.APIKey, error) {

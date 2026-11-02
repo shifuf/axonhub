@@ -567,9 +567,9 @@ const TEST_CHANNEL_MUTATION = `
   }
 `;
 
-const TEST_CHANNEL_QUOTA_MUTATION = `
-  mutation TestChannelQuota($channelType: String!, $baseURL: String!, $quotaApiKey: String!) {
-    testChannelQuota(channelType: $channelType, baseURL: $baseURL, quotaApiKey: $quotaApiKey) {
+const TEST_CHANNEL_BALANCE_MUTATION = `
+  mutation TestChannelBalance($baseURL: String!, $quotaApiKey: String!) {
+    testChannelBalance(baseURL: $baseURL, quotaApiKey: $quotaApiKey) {
       providerType
       status
       ready
@@ -1106,6 +1106,7 @@ export const DEFAULT_CHANNEL_COLUMN_VISIBILITY: ChannelListColumnVisibility = {
   tags: false,
   proxy: false,
   endpointProtocols: true,
+  balance: true,
 };
 
 const channelListColumnVisibilitySchema = z.record(z.string(), z.boolean());
@@ -1368,6 +1369,28 @@ const CHANNEL_QUERY_HEALTH_SELECTION = `
 const CHANNEL_QUERY_QUOTA_SELECTION = `
           providerQuotaStatus {
             status
+            ready
+            quotaData
+            providerType
+            accountKey
+          }
+`;
+
+const REFRESH_CHANNEL_BALANCE_MUTATION = `
+  mutation RefreshChannelBalance($channelID: ID!) {
+    refreshChannelBalance(channelID: $channelID)
+  }
+`;
+
+const SET_CHANNEL_MANUAL_BALANCE_MUTATION = `
+  mutation SetChannelManualBalance($channelID: ID!, $balanceUSD: Float!) {
+    setChannelManualBalance(channelID: $channelID, balanceUSD: $balanceUSD)
+  }
+`;
+
+const CHANNEL_QUERY_QUOTA_DETAILS_SELECTION = `
+          providerQuotaStatus {
+            status
             nextResetAt
             ready
             quotaData
@@ -1406,7 +1429,7 @@ export function buildQueryChannelsQuery(columnVisibility?: ChannelListColumnVisi
         isChannelColumnVisible(columnVisibility, 'proxy') ? CHANNEL_QUERY_PROXY_SELECTION : '',
         isChannelColumnVisible(columnVisibility, 'orderingWeight') ? CHANNEL_QUERY_ORDERING_WEIGHT_SELECTION : '',
         isChannelColumnVisible(columnVisibility, 'health') ? CHANNEL_QUERY_HEALTH_SELECTION : '',
-        isChannelColumnVisible(columnVisibility, 'quota') ? CHANNEL_QUERY_QUOTA_SELECTION : '',
+        isChannelColumnVisible(columnVisibility, 'quota') ? CHANNEL_QUERY_QUOTA_DETAILS_SELECTION : CHANNEL_QUERY_QUOTA_SELECTION,
         isChannelColumnVisible(columnVisibility, 'endpointProtocols') ? CHANNEL_QUERY_ENDPOINTS_SELECTION : '',
       ].join('');
 
@@ -2099,18 +2122,60 @@ export function useBulkManageChannelTags() {
   });
 }
 
-export function useTestChannelQuota() {
+export function useTestChannelBalance() {
   const { handleError } = useErrorHandler();
 
   return useMutation({
-    mutationFn: async (input: { channelType: string; baseURL: string; quotaApiKey: string }): Promise<TestChannelQuotaPayload> => {
+    mutationFn: async (input: { baseURL: string; quotaApiKey: string }): Promise<TestChannelQuotaPayload> => {
       try {
-        const data = await graphqlRequest<{ testChannelQuota: TestChannelQuotaPayload }>(TEST_CHANNEL_QUOTA_MUTATION, input);
-        return testChannelQuotaPayloadSchema.parse(data.testChannelQuota);
+        const data = await graphqlRequest<{ testChannelBalance: TestChannelQuotaPayload }>(TEST_CHANNEL_BALANCE_MUTATION, input);
+        return testChannelQuotaPayloadSchema.parse(data.testChannelBalance);
       } catch (error) {
-        handleError(error, { context: 'Test Channel Quota' });
+        handleError(error, { context: 'Test Channel Balance' });
         throw error;
       }
+    },
+  });
+}
+
+export function useRefreshChannelBalance() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+  const { handleError } = useErrorHandler();
+  return useMutation({
+    mutationFn: async (channelID: string) => {
+      try {
+        const data = await graphqlRequest<{ refreshChannelBalance: boolean }>(REFRESH_CHANNEL_BALANCE_MUTATION, { channelID });
+        return data.refreshChannelBalance;
+      } catch (error) {
+        handleError(error, { context: 'Refresh Channel Balance' });
+        throw error;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['channels'] });
+      toast.success(t('channels.messages.balanceRefreshSuccess'));
+    },
+  });
+}
+
+export function useSetChannelManualBalance() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+  const { handleError } = useErrorHandler();
+  return useMutation({
+    mutationFn: async ({ channelID, balanceUSD }: { channelID: string; balanceUSD: number }) => {
+      try {
+        const data = await graphqlRequest<{ setChannelManualBalance: boolean }>(SET_CHANNEL_MANUAL_BALANCE_MUTATION, { channelID, balanceUSD });
+        return data.setChannelManualBalance;
+      } catch (error) {
+        handleError(error, { context: 'Set Channel Manual Balance' });
+        throw error;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['channels'] });
+      toast.success(t('channels.messages.manualBalanceSuccess'));
     },
   });
 }

@@ -396,6 +396,29 @@ func (r *mutationResolver) TestChannelQuota(ctx context.Context, channelType str
 	}, nil
 }
 
+// TestChannelBalance tests a standalone New API or Sub2API balance token.
+func (r *mutationResolver) TestChannelBalance(ctx context.Context, baseURL string, quotaAPIKey string) (*TestChannelBalancePayload, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return nil, fmt.Errorf("permission denied: write_channels scope required")
+	}
+
+	quotaData, err := r.providerQuotaService.TestBalance(ctx, baseURL, quotaAPIKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to test channel balance: %w", err)
+	}
+	quotaDataBytes, err := json.Marshal(quotaData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode balance result: %w", err)
+	}
+
+	return &TestChannelBalancePayload{
+		ProviderType: quotaData.ProviderType,
+		Status:       quotaData.Status,
+		Ready:        quotaData.Ready,
+		QuotaData:    objects.JSONRawMessage(quotaDataBytes),
+	}, nil
+}
+
 // TestChannelAPIKeys is the resolver for the testChannelAPIKeys field.
 func (r *mutationResolver) TestChannelAPIKeys(ctx context.Context, channelID objects.GUID, modelID *string) (*TestChannelAPIKeysPayload, error) {
 	ctx = contexts.WithSource(ctx, request.SourceTest)
@@ -613,6 +636,22 @@ func (r *mutationResolver) BulkArchiveAPIKeys(ctx context.Context, ids []*object
 		return false, err
 	}
 
+	return true, nil
+}
+
+// DeleteAPIKey is the resolver for the deleteAPIKey field.
+func (r *mutationResolver) DeleteAPIKey(ctx context.Context, id objects.GUID) (bool, error) {
+	if err := r.apiKeyService.DeleteAPIKey(ctx, id.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// BulkDeleteAPIKeys is the resolver for the bulkDeleteAPIKeys field.
+func (r *mutationResolver) BulkDeleteAPIKeys(ctx context.Context, ids []*objects.GUID) (bool, error) {
+	if err := r.apiKeyService.BulkDeleteAPIKeys(ctx, objects.IntGuids(ids)); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 

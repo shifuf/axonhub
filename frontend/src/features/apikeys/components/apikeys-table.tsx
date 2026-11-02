@@ -12,7 +12,7 @@ import {
   getFacetedUniqueValues,
   useReactTable,
 } from '@tanstack/react-table';
-import { IconX, IconUserOff, IconArchive, IconCheck } from '@tabler/icons-react';
+import { IconX, IconUserOff, IconArchive, IconCheck, IconTrash } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -291,6 +291,15 @@ export function ApiKeysTable({
               title={t('common.buttons.archive')}
             >
               <IconArchive className='h-4 w-4' />
+            </Button>
+            <Button
+              variant='ghost'
+              size='icon'
+              className='text-destructive h-8 w-8 hover:bg-red-100 hover:text-red-700'
+              onClick={() => openDialog('bulkDelete')}
+              title={t('common.buttons.delete')}
+            >
+              <IconTrash className='h-4 w-4' />
             </Button>
           </div>
         </div>

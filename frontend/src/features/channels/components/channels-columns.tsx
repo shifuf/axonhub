@@ -45,10 +45,11 @@ import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { DataTableColumnHeader } from '@/components/data-table-column-header';
 import { useChannels } from '../context/channels-context';
-import { useTestChannel, useUpdateChannel } from '../data/channels';
+import { useRefreshChannelBalance, useTestChannel, useUpdateChannel } from '../data/channels';
 import { CHANNEL_CONFIGS, getProvider } from '../data/config_channels';
 import { Channel } from '../data/schema';
 import { parseQuotaLimits } from '../../system/data/quotas';
+import { parseCompatibleQuotaDisplay } from '../../system/data/compatible-quota-display';
 import type { QuotaRoutingMode } from '../../system/data/system';
 import { getChannelQuotaRoutingIndicator } from '../utils/quota-routing-status';
 import { ChannelHealthCell } from './channel-health-cell';
@@ -88,6 +89,65 @@ const QUOTA_WINDOW_LABEL_KEYS: Record<string, string> = {
 function getQuotaLimits(channel: Channel) {
   return channel.providerQuotaStatus ? parseQuotaLimits(channel.providerQuotaStatus.quotaData) : [];
 }
+
+function getChannelBalanceUSD(channel: Channel): number {
+  const quotaData = channel.providerQuotaStatus?.quotaData;
+  const summary = parseCompatibleQuotaDisplay(quotaData);
+  if (summary?.currency.toUpperCase() === 'USD' && summary.available !== undefined) {
+    return Math.max(0, summary.available);
+  }
+
+  if (!quotaData || typeof quotaData !== 'object' || Array.isArray(quotaData)) return 0;
+  const data = quotaData as Record<string, unknown>;
+  const rawData = data.raw_data;
+  const balanceData = rawData && typeof rawData === 'object' && !Array.isArray(rawData) ? (rawData as Record<string, unknown>) : data;
+  const balances = balanceData.balances;
+  if (Array.isArray(balances)) {
+    const usdBalance = balances.find(
+      (balance) =>
+        balance &&
+        typeof balance === 'object' &&
+        !Array.isArray(balance) &&
+        typeof (balance as Record<string, unknown>).currency === 'string' &&
+        (balance as Record<string, unknown>).currency.toUpperCase() === 'USD'
+    );
+    const amount = usdBalance && (usdBalance as Record<string, unknown>).amount;
+    if (typeof amount === 'number' && Number.isFinite(amount)) return Math.max(0, amount);
+  }
+
+  const balance = data.balance;
+  if (balance && typeof balance === 'object' && !Array.isArray(balance)) {
+    const creditsRemaining = (balance as Record<string, unknown>).credits_remaining_usd;
+    if (typeof creditsRemaining === 'number' && Number.isFinite(creditsRemaining)) return Math.max(0, creditsRemaining);
+  }
+
+  const credits = data.credits;
+  if (credits && typeof credits === 'object' && !Array.isArray(credits)) {
+    const monthlyRemaining = (credits as Record<string, unknown>).monthly_remaining_usd;
+    if (typeof monthlyRemaining === 'number' && Number.isFinite(monthlyRemaining)) return Math.max(0, monthlyRemaining);
+  }
+
+  const subscription = data.subscription;
+  if (subscription && typeof subscription === 'object' && !Array.isArray(subscription)) {
+    const remaining = (subscription as Record<string, unknown>).cycle_quota_remaining;
+    if (typeof remaining === 'number' && Number.isFinite(remaining)) return Math.max(0, remaining);
+  }
+
+  for (const key of ['quota_5_hour', 'quota_7_day']) {
+    const quota = data[key];
+    if (!quota || typeof quota !== 'object' || Array.isArray(quota)) continue;
+    const values = quota as Record<string, unknown>;
+    const maximum = values.max_value_usd;
+    const used = values.used_value_usd;
+    if (typeof maximum === 'number' && Number.isFinite(maximum) && typeof used === 'number' && Number.isFinite(used)) {
+      return Math.max(0, maximum - used);
+    }
+  }
+
+  return 0;
+}
+
+const formatBalanceUSD = (value: number) => `$${value.toFixed(2)}`;
 
 // A channel that draws from several accounts reports one limit per account, so
 // the cell keeps a single row per window (the worst account of that window) and
@@ -160,6 +220,7 @@ const ActionCell = memo(({ row }: { row: Row<Channel> }) => {
   const { setOpen, setCurrentRow } = useChannels();
   const { channelPermissions } = usePermissions();
   const testChannel = useTestChannel();
+  const refreshBalance = useRefreshChannelBalance();
   const isArchived = channel.status === 'archived';
   const hasError = channel.errorMessage != null;
   const hasDisabledAPIKeys = channelPermissions.canWrite && (channel.disabledAPIKeys?.length ?? 0) > 0;
@@ -188,6 +249,10 @@ const ActionCell = memo(({ row }: { row: Row<Channel> }) => {
     setOpen('edit');
   }, [channel, setCurrentRow, setOpen]);
 
+  const handleRefreshBalance = useCallback(() => {
+    refreshBalance.mutate(channel.id);
+  }, [channel.id, refreshBalance]);
+
   return (
     <div className='flex items-center justify-center gap-1'>
       <Button size='sm' variant='outline' className='h-8 w-8 p-0' onClick={handleEdit}>
@@ -207,6 +272,23 @@ const ActionCell = memo(({ row }: { row: Row<Channel> }) => {
             <IconPlayerPlay size={16} className='mr-2' />
             {t('channels.actions.test')}
           </DropdownMenuItem>
+          {channelPermissions.canWrite && (
+            <>
+              <DropdownMenuItem onClick={handleRefreshBalance} disabled={refreshBalance.isPending}>
+                <IconLoader2 size={16} className={refreshBalance.isPending ? 'mr-2 animate-spin' : 'mr-2'} />
+                {t('channels.actions.refreshBalance')}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => {
+                  setCurrentRow(channel);
+                  setOpen('balance');
+                }}
+              >
+                <IconCoin size={16} className='mr-2' />
+                {t('channels.actions.manualBalance')}
+              </DropdownMenuItem>
+            </>
+          )}
           <DropdownMenuItem
             onClick={() => {
               setCurrentRow(channel);
@@ -1011,7 +1093,7 @@ export const createColumns = (
       header: ({ column }) => <DataTableColumnHeader column={column} title={t('common.columns.name')} />,
       cell: ({ row }: { row: Row<Channel> }) => <NameCell row={row} globalDefaultMode={globalDefaultMode} />,
       meta: {
-        className: 'w-[15%] min-w-40 text-left',
+        className: 'w-[13%] min-w-40 text-left',
       },
       enableHiding: false,
       enableSorting: true,
@@ -1022,7 +1104,7 @@ export const createColumns = (
       header: ({ column }) => <DataTableColumnHeader column={column} title={t('channels.columns.provider')} className='justify-center' />,
       cell: ProviderCell,
       meta: {
-        className: 'w-[19%] min-w-28 text-center',
+        className: 'w-[17%] min-w-28 text-center',
       },
       filterFn: (row, _id, value) => {
         return value.includes(row.original.type);
@@ -1035,7 +1117,7 @@ export const createColumns = (
       header: ({ column }) => <DataTableColumnHeader column={column} title={t('common.columns.status')} className='justify-center' />,
       cell: StatusSwitchCell,
       meta: {
-        className: 'w-[15%] min-w-20 text-center',
+        className: 'w-[13%] min-w-20 text-center',
       },
       enableSorting: true,
       enableHiding: false,
@@ -1046,9 +1128,22 @@ export const createColumns = (
       header: ({ column }) => <DataTableColumnHeader column={column} title={t('channels.columns.quota')} className='justify-center' />,
       cell: QuotaCell,
       meta: {
-        className: 'w-[10%] min-w-36 text-center',
+        className: 'w-[9%] min-w-36 text-center',
       },
       enableSorting: false,
+      enableHiding: true,
+    },
+    {
+      id: 'balance',
+      accessorFn: (row) => getChannelBalanceUSD(row),
+      header: ({ column }) => <DataTableColumnHeader column={column} title={t('channels.columns.balance')} className='justify-center' />,
+      cell: ({ row }: { row: Row<Channel> }) => (
+        <div className='text-center font-medium tabular-nums'>{formatBalanceUSD(getChannelBalanceUSD(row.original))}</div>
+      ),
+      meta: {
+        className: 'w-[9%] min-w-24 text-center',
+      },
+      enableSorting: true,
       enableHiding: true,
     },
 
@@ -1057,7 +1152,7 @@ export const createColumns = (
       header: ({ column }) => <DataTableColumnHeader column={column} title={t('channels.columns.tags')} className='justify-center' />,
       cell: TagsCell,
       meta: {
-        className: 'w-[10%] min-w-28 text-center',
+        className: 'w-[9%] min-w-28 text-center',
       },
       filterFn: (row, id, value) => {
         const tags = (row.getValue(id) as string[]) || [];
@@ -1085,7 +1180,7 @@ export const createColumns = (
       ),
       cell: SupportedModelsCell,
       meta: {
-        className: 'w-[18%] min-w-48 max-w-none text-center',
+        className: 'w-[16%] min-w-48 max-w-none text-center',
       },
       enableSorting: false,
     },
@@ -1108,7 +1203,7 @@ export const createColumns = (
       header: ({ column }) => <DataTableColumnHeader column={column} title={t('channels.columns.proxy')} className='justify-center' />,
       cell: ProxyCell,
       meta: {
-        className: 'w-[13%] min-w-28 text-center',
+        className: 'w-[14%] min-w-28 text-center',
       },
       enableSorting: false,
       enableHiding: true,

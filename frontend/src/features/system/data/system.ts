@@ -238,9 +238,10 @@ const PREVIEW_GC_CLEANUP_QUERY = `
   query previewGcCleanup($input: TriggerGcCleanupInput!) {
     previewGcCleanup(input: $input) {
       resourceType
-      estimatedCount
-      cutoffTime
-      retentionDays
+        estimatedCount
+        cutoffTime
+        retentionDays
+        retentionHours
     }
   }
 `;
@@ -326,6 +327,11 @@ export interface TriggerGcCleanupInput {
   requestBodiesCleanupDays?: number;
   responseBodiesCleanupDays?: number;
   responseChunksCleanupDays?: number;
+  requestsCleanupHours?: number;
+  usageLogsCleanupHours?: number;
+  requestBodiesCleanupHours?: number;
+  responseBodiesCleanupHours?: number;
+  responseChunksCleanupHours?: number;
 }
 
 export interface GcCleanupPreviewItem {
@@ -333,6 +339,7 @@ export interface GcCleanupPreviewItem {
   estimatedCount: number;
   cutoffTime: string;
   retentionDays: number;
+  retentionHours: number;
 }
 
 export interface AutoDisableChannel {

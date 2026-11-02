@@ -55,6 +55,30 @@ func TestMutationResolver_TestChannelQuotaReturnsNormalizedQuotaWithoutEchoingTo
 	require.NotContains(t, err.Error(), "sensitive-token")
 }
 
+func TestMutationResolver_TestChannelBalanceRequiresWriteChannelsScope(t *testing.T) {
+	resolver := &mutationResolver{&Resolver{}}
+
+	result, err := resolver.TestChannelBalance(context.Background(), "https://gateway.example", "sensitive-token")
+
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "write_channels")
+}
+
+func TestMutationResolver_TestChannelBalanceDoesNotUseChannelType(t *testing.T) {
+	ctx := contexts.WithUser(context.Background(), &ent.User{
+		ID:     1,
+		Scopes: []string{string(scopes.ScopeWriteChannels)},
+	})
+	service := &biz.ProviderQuotaService{}
+	resolver := &mutationResolver{&Resolver{providerQuotaService: service}}
+
+	_, err := resolver.TestChannelBalance(ctx, "https://gateway.example", "sensitive-token")
+
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "sensitive-token")
+	require.NotContains(t, err.Error(), "channel type")
+}
+
 func TestQueryResolver_AllChannelSummarys_ProjectProfileUsesIntersection(t *testing.T) {
 	resolver, ctx, client := setupTestQueryResolver(t)
 	defer client.Close()

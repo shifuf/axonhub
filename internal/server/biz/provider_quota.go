@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"sync"
@@ -834,6 +835,9 @@ func (svc *ProviderQuotaService) checkChannelQuota(ctx context.Context, group qu
 	}
 
 	if !hasCredentialsForProvider(ch) {
+		if hasManualBalance(ch) {
+			return
+		}
 		if supportsQuotaAPIKey(ch.Type) {
 			return
 		}
@@ -917,6 +921,15 @@ func (svc *ProviderQuotaService) checkChannelQuota(ctx context.Context, group qu
 	}
 }
 
+func hasManualBalance(ch *ent.Channel) bool {
+	if ch == nil || ch.Edges.ProviderQuotaStatus == nil {
+		return false
+	}
+	value, ok := ch.Edges.ProviderQuotaStatus.QuotaData["manual_balance"]
+	manual, ok := value.(bool)
+	return ok && manual
+}
+
 // channelWithQuotaCredential returns a shallow channel copy using only the
 // dedicated quota credential for checkers that authenticate through APIKey.
 // Management-key checkers retain their established independent credential.
@@ -944,6 +957,7 @@ func (svc *ProviderQuotaService) TestQuota(ctx context.Context, channelType chan
 		Type:    channelType,
 		BaseURL: strings.TrimSpace(baseURL),
 		Credentials: objects.ChannelCredentials{
+			APIKey:      token,
 			QuotaAPIKey: token,
 		},
 	}
@@ -958,6 +972,219 @@ func (svc *ProviderQuotaService) TestQuota(ctx context.Context, channelType chan
 		return provider_quota.QuotaData{}, redactQuotaTokenError(err, token)
 	}
 	return provider_quota.NormalizeQuotaData(quotaData), nil
+}
+
+// TestBalance probes supported self-hosted gateway APIs without using the
+// channel's provider type or saving the supplied token.
+func (svc *ProviderQuotaService) TestBalance(ctx context.Context, baseURL, token string) (provider_quota.QuotaData, error) {
+	checker, ok := svc.checkers["compatible"].(*provider_quota.CompatibleQuotaChecker)
+	if !ok {
+		return provider_quota.QuotaData{}, errors.New("standalone balance checker is unavailable")
+	}
+
+	quotaData, err := checker.CheckStandaloneBalance(ctx, baseURL, token)
+	if err != nil {
+		return provider_quota.QuotaData{}, redactQuotaTokenError(err, strings.TrimSpace(token))
+	}
+	return quotaData, nil
+}
+
+// RefreshChannelBalance refreshes a channel with the standalone New API or
+// Sub2API checker. It deliberately ignores the channel provider type so these
+// gateways can be used as an independent balance source for any channel.
+func (svc *ProviderQuotaService) RefreshChannelBalance(ctx context.Context, channelID int) error {
+	ch, err := svc.db.Channel.Query().Where(channel.IDEQ(channelID)).Only(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load channel: %w", err)
+	}
+	token := strings.TrimSpace(ch.Credentials.QuotaAPIKey)
+	if token == "" {
+		return errors.New("channel has no balance token; add a quota token first")
+	}
+
+	checker, ok := svc.checkers["compatible"].(*provider_quota.CompatibleQuotaChecker)
+	if !ok {
+		return errors.New("standalone balance checker is unavailable")
+	}
+	quotaData, err := checker.CheckStandaloneBalance(ctx, ch.BaseURL, token)
+	if err != nil {
+		return redactQuotaTokenError(err, token)
+	}
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.saveQuotaStatus(ctx, channelID, "compatible", "", provider_quota.NormalizeQuotaData(quotaData), time.Now())
+	return nil
+}
+
+// SetChannelManualBalance creates a USD balance for a channel even when it has
+// no remote balance token. A later refresh replaces this manual snapshot.
+func (svc *ProviderQuotaService) SetChannelManualBalance(ctx context.Context, channelID int, balanceUSD float64) error {
+	if math.IsNaN(balanceUSD) || math.IsInf(balanceUSD, 0) || balanceUSD < 0 {
+		return errors.New("manual balance must be a non-negative USD amount")
+	}
+	if _, err := svc.db.Channel.Query().Where(channel.IDEQ(channelID)).Only(ctx); err != nil {
+		return fmt.Errorf("failed to load channel: %w", err)
+	}
+
+	quotaData := provider_quota.QuotaData{
+		ProviderType: "compatible",
+		Status:       "available",
+		Ready:        balanceUSD > 0,
+		RawData: map[string]any{
+			"source":              "manual",
+			"manual_balance":      true,
+			"currency":            "USD",
+			"balance_usd":         balanceUSD,
+			"total_available_usd": balanceUSD,
+			"total_granted_usd":   balanceUSD,
+			"remaining":           balanceUSD,
+		},
+		Limits: []provider_quota.QuotaLimitStatus{
+			provider_quota.NewTokenLimitStatus(manualBalanceStatus(balanceUSD), 0, nil).WithWindow(provider_quota.QuotaWindowCredits, 0),
+		},
+	}
+	if balanceUSD == 0 {
+		quotaData.Status = "exhausted"
+		quotaData.Limits[0].UsageRatio = 1
+		quotaData.Limits[0].Ready = false
+	}
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.saveQuotaStatus(ctx, channelID, "compatible", "", quotaData, time.Now())
+	return nil
+}
+
+func manualBalanceStatus(balanceUSD float64) string {
+	if balanceUSD <= 0 {
+		return "exhausted"
+	}
+	return "available"
+}
+
+// RecordUsageCost deducts a successfully billed request from a persisted USD
+// balance. Requests without a configured cost are intentionally ignored.
+func (svc *ProviderQuotaService) RecordUsageCost(ctx context.Context, channelID int, costUSD float64) error {
+	if channelID == 0 || math.IsNaN(costUSD) || math.IsInf(costUSD, 0) || costUSD <= 0 {
+		return nil
+	}
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+
+	status, err := svc.db.ProviderQuotaStatus.Query().Where(providerquotastatus.ChannelIDEQ(channelID)).Only(ctx)
+	if ent.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to load channel balance: %w", err)
+	}
+	data := status.QuotaData
+	if data == nil {
+		return nil
+	}
+	balance, ok := quotaDataNumber(data, "balance_usd")
+	if !ok {
+		return nil
+	}
+	balance = math.Max(0, balance-costUSD)
+	data["balance_usd"] = balance
+	data["total_available_usd"] = balance
+	data["remaining"] = balance
+	if raw, ok := data["raw_data"].(map[string]any); ok {
+		raw["balance_usd"] = balance
+		raw["total_available_usd"] = balance
+		raw["remaining"] = balance
+	}
+
+	newStatus := providerquotastatus.StatusAvailable
+	ready := true
+	if balance <= 0 {
+		newStatus = providerquotastatus.StatusExhausted
+		ready = false
+	}
+	if total, ok := quotaDataNumber(data, "total_granted_usd"); ok && total > 0 {
+		ratio := math.Min(1, math.Max(0, 1-balance/total))
+		if ratio >= provider_quota.WarningThresholdRatio && balance > 0 {
+			newStatus = providerquotastatus.StatusWarning
+		}
+		if limits := extractLimitsFromQuotaData(data); len(limits) > 0 {
+			for i := range limits {
+				limits[i].UsageRatio = ratio
+				limits[i].Status = string(newStatus)
+				limits[i].Ready = newStatus != providerquotastatus.StatusExhausted
+			}
+			data["_limits"] = limitStatusMaps(limits)
+		}
+	}
+	ready = newStatus != providerquotastatus.StatusExhausted
+	if err := svc.db.ProviderQuotaStatus.UpdateOne(status).
+		SetStatus(newStatus).
+		SetReady(ready).
+		SetQuotaData(data).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("failed to deduct channel balance: %w", err)
+	}
+	svc.updateQuotaCache(channelID, status.ProviderType.String(), newStatus, ready, extractLimitsFromQuotaData(data))
+	return nil
+}
+
+func quotaDataNumber(data map[string]any, key string) (float64, bool) {
+	if value, ok := provider_quotaNumber(data[key]); ok {
+		return value, true
+	}
+	if raw, ok := data["raw_data"].(map[string]any); ok {
+		return provider_quotaNumber(raw[key])
+	}
+	return 0, false
+}
+
+func provider_quotaNumber(value any) (float64, bool) {
+	switch value := value.(type) {
+	case float64:
+		return value, !math.IsNaN(value) && !math.IsInf(value, 0)
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func limitStatusMaps(limits []provider_quota.QuotaLimitStatus) []map[string]any {
+	result := make([]map[string]any, 0, len(limits))
+	for _, limit := range limits {
+		item := map[string]any{
+			"type": limit.Type, "status": limit.Status, "usageRatio": limit.UsageRatio, "ready": limit.Ready,
+		}
+		if limit.Window != "" {
+			item["window"] = limit.Window
+		}
+		if limit.Account != "" {
+			item["account"] = limit.Account
+		}
+		if limit.AvailabilityGroup != "" {
+			item["availabilityGroup"] = limit.AvailabilityGroup
+		}
+		if limit.NextResetAt != nil {
+			item["nextResetAt"] = limit.NextResetAt.Format(time.RFC3339)
+		}
+		if limit.PeriodStart != nil {
+			item["periodStart"] = limit.PeriodStart.Format(time.RFC3339)
+		}
+		if limit.PeriodCost != nil {
+			item["periodCost"] = *limit.PeriodCost
+		}
+		if limit.PeriodQuota != nil {
+			item["periodQuota"] = *limit.PeriodQuota
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func redactQuotaTokenError(err error, token string) error {

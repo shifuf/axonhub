@@ -515,6 +515,13 @@ type TestChannelAPIKeysPayload struct {
 	Results      []*TestAPIKeyResult `json:"results"`
 }
 
+type TestChannelBalancePayload struct {
+	ProviderType string                 `json:"providerType"`
+	Status       string                 `json:"status"`
+	Ready        bool                   `json:"ready"`
+	QuotaData    objects.JSONRawMessage `json:"quotaData"`
+}
+
 type TestChannelInput struct {
 	ChannelID objects.GUID            `json:"channelID"`
 	ModelID   *string                 `json:"modelID,omitempty"`

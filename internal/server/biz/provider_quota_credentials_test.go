@@ -146,6 +146,20 @@ func TestProviderQuotaService_TestQuotaUsesCompatibleCheckerForUnknownOpenAIURL(
 	require.Equal(t, "temporary-token", checker.quotaAPIKey)
 }
 
+func TestProviderQuotaService_TestQuotaPassesTemporaryTokenToCheckerSupportCheck(t *testing.T) {
+	service, _, _, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+	checker := &credentialRequiredQuotaChecker{}
+	service.checkers["compatible"] = checker
+
+	quota, err := service.TestQuota(t.Context(), channel.TypeOpenai, "https://unrecognized.example/v1", "temporary-token")
+
+	require.NoError(t, err)
+	require.Equal(t, "available", quota.Status)
+	require.Equal(t, "temporary-token", checker.supportCheckedAPIKey)
+	require.Equal(t, "temporary-token", checker.checkedAPIKey)
+}
+
 func TestProviderQuotaService_TestQuotaRedactsTokenFromCheckerErrors(t *testing.T) {
 	service, _, _, client := setupProviderQuotaCollectionService(t)
 	defer client.Close()
@@ -155,6 +169,17 @@ func TestProviderQuotaService_TestQuotaRedactsTokenFromCheckerErrors(t *testing.
 
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "temporary-secret")
+}
+
+func TestProviderQuotaService_TestBalanceIsIndependentOfChannelType(t *testing.T) {
+	service, _, _, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+
+	_, err := service.TestBalance(t.Context(), "https://unsupported.example", "temporary-token")
+
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "temporary-token")
+	require.NotContains(t, err.Error(), "channel type")
 }
 
 func TestProviderQuotaService_CheckChannelQuota_IgnoreModeSkipsCheckerAndClearsStatus(t *testing.T) {
@@ -236,6 +261,21 @@ func TestProviderQuotaService_CheckChannelQuota_MixedGroupDoesNotSaveIgnoredMemb
 }
 
 type quotaErrorChecker struct{ err error }
+
+type credentialRequiredQuotaChecker struct {
+	supportCheckedAPIKey string
+	checkedAPIKey        string
+}
+
+func (c *credentialRequiredQuotaChecker) SupportsChannel(ch *ent.Channel) bool {
+	c.supportCheckedAPIKey = ch.Credentials.APIKey
+	return ch.Credentials.APIKey != ""
+}
+
+func (c *credentialRequiredQuotaChecker) CheckQuota(_ context.Context, ch *ent.Channel) (provider_quota.QuotaData, error) {
+	c.checkedAPIKey = ch.Credentials.APIKey
+	return provider_quota.QuotaData{Status: "available", Ready: true}, nil
+}
 
 func (c quotaErrorChecker) CheckQuota(context.Context, *ent.Channel) (provider_quota.QuotaData, error) {
 	return provider_quota.QuotaData{}, c.err

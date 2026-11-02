@@ -571,6 +571,8 @@ export const testChannelQuotaPayloadSchema = z.object({
   quotaData: z.unknown(),
 });
 export type TestChannelQuotaPayload = z.infer<typeof testChannelQuotaPayloadSchema>;
+export const testChannelBalancePayloadSchema = testChannelQuotaPayloadSchema;
+export type TestChannelBalancePayload = TestChannelQuotaPayload;
 
 // Pricing Schemas
 export const pricingModeSchema = z.enum(['flat_fee', 'usage_per_unit', 'usage_tiered', 'usage_volume']);
