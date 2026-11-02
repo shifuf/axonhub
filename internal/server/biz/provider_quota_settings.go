@@ -16,7 +16,7 @@ var supportedProviderQuotaTypes = []string{
 	"xai_subscription",
 	"synthetic", "neuralwatt", "apertis", "opencode_go",
 	"kimi_code", "minimax", "zhipu", "zai", "charm_hyper", "zenmux", "commandcode",
-	"ollama",
+	"ollama", "compatible",
 }
 
 var supportedProviderQuotaTypeSet = func() map[string]struct{} {

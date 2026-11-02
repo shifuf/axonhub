@@ -103,9 +103,14 @@ archives:
         dst: restart.bat
       - src: deploy/upgrade.bat
         dst: upgrade.bat
+      - src: deploy/axonhub-update.sh
+        dst: axonhub-update.sh
 
 brews:
   - name: axonhub
+    # Fork releases are beta tags; do not push an upstream-owned Homebrew tap.
+    # Stable tags on the upstream repository retain GoReleaser's auto behavior.
+    skip_upload: auto
     ids: [archive]
     repository:
       owner: looplj

@@ -5,11 +5,14 @@
 
 ## 核心思路
 
-更新只做三件事，全部不中断（容器原地重建，数据卷不动）：
+更新只做四件事，全部不中断（容器原地重建，数据卷不动）：
 
 1. **在线备份**：pg_dump（Postgres）或直接拷贝 SQLite 文件 -> backups/
-2. **换镜像 tag**：把 AXONHUB_IMAGE 写进 .env（不动 compose 主文件）
-3. **重建容器 + 健康检查**：/health 通过即成功；失败自动回滚旧镜像
+2. **国内直接下载镜像归档**：Release 里的 `axonhub-vX.Y.Z-linux-amd64.tar.gz`
+   经 `gh-proxy.com` 下载，不访问 Docker Hub / ghcr.io
+3. **校验并导入**：校验 SHA256 后执行 `docker load`
+4. **换镜像 + 重建 + 健康检查**：把 AXONHUB_IMAGE 写进 .env，重建容器；
+   /health 通过即成功，失败自动回滚旧镜像
 
 数据库保存在 named volume / 挂载目录里，重建容器不会丢数据；
 Ent 迁移在启动时自动执行（自动建新表/新列）。
@@ -24,23 +27,35 @@ Ent 迁移在启动时自动执行（自动建新表/新列）。
       "https://gh-proxy.com/https://raw.githubusercontent.com/shifuf/axonhub/dev/deploy/axonhub-update.sh"
     sed -i 's/\r$//' axonhub-update.sh && chmod +x axonhub-update.sh
 
-日常更新（自动取最新 dev 镜像）：
+日常更新（下载最新稳定 Release 镜像归档）：
 
     bash axonhub-update.sh
 
-或锁定某个版本：
+或锁定某个 Release：
+
+    bash axonhub-update.sh v1.0.0-beta14
+
+legacy dev 镜像仍可指定：
 
     bash axonhub-update.sh dev-1bc55dd
 
 可选环境变量：
 
 - AXONHUB_DIR=/path   指定部署目录（默认自动探测 /www/wwwroot/axonhub 等）
-- IMAGE=ghcr.io/shifuf/axonhub:dev-xxxx   直接指定完整镜像
-- PULL_IMAGES=1       强制 docker compose pull（默认跳过，避免 ghcr 超时）
+- RELEASE_PROXY=https://gh-proxy.com/   镜像归档下载加速地址；设为空则直连
+- IMAGE=ghcr.io/shifuf/axonhub:vX.Y.Z    指定完整镜像并改用 registry 模式
+- USE_REGISTRY=1      对 vX.Y.Z 也改用 registry 模式
+- PULL_IMAGES=1       registry 模式下执行 docker compose pull（archive 模式不需要）
 - SKIP_BACKUP=1       跳过备份（不推荐）
 
-脚本行为：[INFO] online backup... -> [OK] .env -> <新镜像> ->
-[INFO] recreating container... -> [INFO] health check ... -> [OK] update complete
+脚本行为：[INFO] online backup... -> [INFO] download (mirror)... ->
+[OK] sha256 verified -> [INFO] recreating container... ->
+[INFO] health check ... -> [OK] update complete
+
+Release 同时提供两个归档名：
+
+- `axonhub-vX.Y.Z-linux-amd64.tar.gz`：固定版本，推荐生产使用
+- `axonhub-linux-amd64.tar.gz`：稳定版别名，供 `bash axonhub-update.sh` 使用
 
 ## 首次部署（如果服务器上还没有 compose）
 
@@ -50,7 +65,7 @@ Ent 迁移在启动时自动执行（自动建新表/新列）。
     DB_PASSWORD=改成强密码
     AXONHUB_HOST_PORT=8090
     POSTGRES_IMAGE=postgres:16-alpine
-    AXONHUB_IMAGE=ghcr.io/shifuf/axonhub:latest
+    AXONHUB_IMAGE=ghcr.io/shifuf/axonhub:v1.0.0-beta14
     EOF
     docker compose up -d
     curl http://127.0.0.1:8090/health
@@ -70,11 +85,13 @@ SQLite 单容器部署：把 docker-compose.yml 中 axonhub-sqlite 段取消注�
 
 - unstable 分支：每天自动镜像上游 looplj/axonhub（sync-upstream.yml）
 - dev 分支：你的功能分支；push 到 dev 触发 docker-publish.yml，
-  构建并发布 ghcr.io/shifuf/axonhub:latest 与 dev-<sha>
+  构建 ghcr.io/shifuf/axonhub:latest 与 dev-<sha>
+- Release tag：release.yml 构建对应版本镜像，上传 Linux amd64 镜像归档和
+  SHA256 到 GitHub Release，供国内服务器直接下载并 `docker load`
 
 合并流程：本地 git fetch origin && git merge origin/unstable（解决冲突、
 review 后）-> git push origin dev -> Actions 出镜像 -> 服务器
-bash axonhub-update.sh dev-<新sha>
+bash axonhub-update.sh v<新版本>
 
 ## 回滚
 

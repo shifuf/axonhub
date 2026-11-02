@@ -69,6 +69,26 @@ type ProviderQuotaDataCommon = {
   _resets?: ProviderQuotaResetList;
 };
 
+export type ProviderCompatibleQuotaData = ProviderQuotaDataCommon & {
+  source?: string;
+  currency?: string;
+  remaining?: number;
+  balance_usd?: number;
+  total_granted_usd?: number;
+  total_used_usd?: number;
+  total_available_usd?: number;
+  today_cost_usd?: number;
+  today_requests?: number;
+  unlimited_quota?: boolean;
+  expires_at?: string;
+  balances?: Array<{
+    amount: number;
+    currency: string;
+    granted_amount?: number;
+    topped_up_amount?: number;
+  }>;
+};
+
 type ProviderClaudeQuotaWindow = {
   utilization?: number;
   reset?: number;
@@ -259,7 +279,6 @@ export type ProviderOpenCodeGoQuotaData = ProviderQuotaDataCommon & {
     monthly?: OpenCodeGoQuotaWindow;
   };
 };
-
 
 export type KimiCodeUsageRow = {
   label: string;
@@ -776,6 +795,20 @@ export type ProviderQuotaChannel = {
     }
   | {
       type: 'openai' | 'openai_responses';
+      providerType: 'compatible';
+      quotaStatus: {
+        quotaData: ProviderCompatibleQuotaData;
+      };
+    }
+  | {
+      type: 'deepseek' | 'deepseek_anthropic';
+      providerType: 'compatible';
+      quotaStatus: {
+        quotaData: ProviderCompatibleQuotaData;
+      };
+    }
+  | {
+      type: 'openai' | 'openai_responses';
       providerType?: undefined;
       quotaStatus: {
         quotaData: ProviderQuotaDataCommon;
@@ -973,11 +1006,27 @@ function parseChannelNode(node: QueryChannelNodeWithQuota): ProviderQuotaChannel
         quotaStatus: { ...base.quotaStatus, quotaData: node.providerQuotaStatus.quotaData as ProviderCharmHyperQuotaData },
       };
     }
+    if (providerType === 'compatible') {
+      return {
+        ...base,
+        type: typeVal,
+        providerType: 'compatible' as const,
+        quotaStatus: { ...base.quotaStatus, quotaData: node.providerQuotaStatus.quotaData as ProviderCompatibleQuotaData },
+      };
+    }
     return {
       ...base,
       type: typeVal,
       providerType: undefined,
       quotaStatus: { ...base.quotaStatus, quotaData: node.providerQuotaStatus.quotaData as ProviderQuotaDataCommon },
+    };
+  }
+  if (node.type === 'deepseek' || node.type === 'deepseek_anthropic') {
+    return {
+      ...base,
+      type: node.type as 'deepseek' | 'deepseek_anthropic',
+      providerType: 'compatible' as const,
+      quotaStatus: { ...base.quotaStatus, quotaData: node.providerQuotaStatus.quotaData as ProviderCompatibleQuotaData },
     };
   }
 

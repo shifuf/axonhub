@@ -21,7 +21,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TagsAutocompleteInput } from '@/components/ui/tags-autocomplete-input';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { ApiKeyStrategyFields, type APIKeyStrategyValue } from './channel-api-key-strategy';
+import { CompatibleQuotaSummary } from '@/components/compatible-quota-summary';
 import { SelectDropdown } from '@/components/select-dropdown';
 import {
   usePassThroughSettings,
@@ -74,6 +74,7 @@ import {
   ChannelSettings,
   ChannelQuotaRoutingMode,
   RetryableErrorPattern,
+  TestChannelQuotaPayload,
   createChannelInputSchema,
   updateChannelInputSchema,
 } from '../data/schema';
@@ -81,6 +82,7 @@ import { xaiDecodeSSO, xaiOAuthExchange, xaiOAuthStart } from '../data/xai';
 import { ProxyConfig, useOAuthFlow } from '../hooks/use-oauth-flow';
 import { mergeChannelSettingsForUpdate } from '../utils/merge';
 import { isValidModelPattern } from '../utils/pattern';
+import { ApiKeyStrategyFields, type APIKeyStrategyValue } from './channel-api-key-strategy';
 import { ProxyType } from './channels-proxy-dialog';
 import { CopilotDeviceFlow } from './copilot-device-flow';
 import { ManualModelBadge } from './manual-model-badge';
@@ -422,10 +424,7 @@ function reconcileGroupedSupportedModels(groups: Array<{ models?: string[] | nul
   return [...new Set(groups.flatMap((group) => group.models || []))];
 }
 
-function reconcileGroupedManualModels(
-  groups: Array<{ models?: string[] | null }>,
-  manualModels: string[]
-): string[] {
+function reconcileGroupedManualModels(groups: Array<{ models?: string[] | null }>, manualModels: string[]): string[] {
   const selectedModels = new Set(groups.flatMap((group) => group.models || []));
   return manualModels.filter((model) => selectedModels.has(model));
 }
@@ -742,6 +741,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
     return initialRow?.settings?.passThroughBody ?? null;
   });
   const [quotaRoutingMode, setQuotaRoutingMode] = useState<ChannelQuotaRoutingMode>(() => recallQuotaRoutingMode(initialRow?.settings));
+  const [quotaTestResult, setQuotaTestResult] = useState<TestChannelQuotaPayload | null>(null);
   const [retryableStatusCodesText, setRetryableStatusCodesText] = useState(() =>
     formatRetryableStatusCodes(initialRow?.settings?.retryableStatusCodes)
   );
@@ -765,9 +765,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         value: t(passThroughSettings.enabled ? 'channels.dialogs.bodyPassThrough.enabled' : 'channels.dialogs.bodyPassThrough.disabled'),
       })
     : t('channels.dialogs.bodyPassThrough.inherit');
-  const [apiKeyStrategy, setApiKeyStrategy] = useState<APIKeyStrategyValue>(
-    () => initialRow?.settings?.apiKeyStrategy ?? 'sticky'
-  );
+  const [apiKeyStrategy, setApiKeyStrategy] = useState<APIKeyStrategyValue>(() => initialRow?.settings?.apiKeyStrategy ?? 'sticky');
   const [apiKeyRoundRobinSwitchAfter, setApiKeyRoundRobinSwitchAfter] = useState<number>(
     () => initialRow?.settings?.apiKeyRoundRobinSwitchAfter ?? 1
   );
@@ -1183,18 +1181,24 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const isCopilotType = activeChannelType === 'github_copilot';
   const isXAISubscriptionType = activeChannelType === 'xai_subscription';
   const isZenmuxType = ['zenmux', 'zenmux_responses', 'zenmux_anthropic', 'zenmux_gemini', 'zenmux_video'].includes(activeChannelType);
-  const supportsQuotaAPIKey = ['nanogpt', 'nanogpt_responses', 'cline', 'minimax', 'minimax_anthropic', 'zhipu', 'zhipu_anthropic', 'zai', 'zai_anthropic', 'opencode_go', 'opencode_go_anthropic', 'moonshot_coding'].includes(activeChannelType) || (
-    ['openai', 'openai_responses'].includes(activeChannelType) &&
-    /(?:^|\.)(?:api\.(?:synthetic\.new|neuralwatt\.com|apertis\.ai)|hyper\.charm\.land)$/i.test(
-      (() => {
-        try {
-          return new URL(form.watch('baseURL') || '').hostname;
-        } catch {
-          return '';
-        }
-      })(),
-    )
-  );
+  const supportsQuotaAPIKey = [
+    'nanogpt',
+    'nanogpt_responses',
+    'cline',
+    'minimax',
+    'minimax_anthropic',
+    'zhipu',
+    'zhipu_anthropic',
+    'zai',
+    'zai_anthropic',
+    'opencode_go',
+    'opencode_go_anthropic',
+    'moonshot_coding',
+    'openai',
+    'openai_responses',
+    'deepseek',
+    'deepseek_anthropic',
+  ].includes(activeChannelType);
   const isCommandCodeType = activeChannelType === 'commandcode' || activeChannelType === 'commandcode_anthropic';
   const isOllamaType = activeChannelType === 'ollama' || activeChannelType === 'ollama_anthropic';
 
@@ -1678,10 +1682,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       const codexThirdPartyCredentialError = getCodexThirdPartyCredentialError({
         type: valuesForSubmit.type,
         authMode,
-        apiKeys: [
-          ...(values.credentials?.apiKeys || []),
-          ...(values.credentials?.keyGroups || []).flatMap((group) => group.apiKeys || []),
-        ],
+        apiKeys: [...(values.credentials?.apiKeys || []), ...(values.credentials?.keyGroups || []).flatMap((group) => group.apiKeys || [])],
       });
       if (codexThirdPartyCredentialError) {
         form.setError('credentials.apiKeys', {
@@ -1718,22 +1719,22 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           : { ...submittedCredentials, vertexApiKeys: undefined };
 
       const submittedKeyGroups = valuesForSubmit.credentials?.keyGroups || [];
-      const resolvedSupportedModels =
-        submittedKeyGroups.length > 0
-          ? reconcileGroupedSupportedModels(submittedKeyGroups)
-          : supportedModels;
+      const resolvedSupportedModels = submittedKeyGroups.length > 0 ? reconcileGroupedSupportedModels(submittedKeyGroups) : supportedModels;
       const dataWithModels = {
         ...valuesForSubmit,
         supportedModels: resolvedSupportedModels,
         manualModels,
         credentials: credentials
-          ? getCodexThirdPartySubmitCredentials({
-              ...credentials,
-              quotaApiKey: supportsQuotaAPIKey ? credentials.quotaApiKey?.trim() || undefined : undefined,
-            }, {
-              type: valuesForSubmit.type,
-              authMode,
-            })
+          ? getCodexThirdPartySubmitCredentials(
+              {
+                ...credentials,
+                quotaApiKey: supportsQuotaAPIKey ? credentials.quotaApiKey?.trim() || undefined : undefined,
+              },
+              {
+                type: valuesForSubmit.type,
+                authMode,
+              }
+            )
           : credentials,
       };
       // The Command Code / Ollama quota cookie is a browser-session credential
@@ -1796,9 +1797,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           maxSingleChannelRetries,
           apiKeyStrategy,
           apiKeyRoundRobinSwitchAfter:
-            apiKeyStrategy === 'round_robin' || apiKeyStrategy === 'round_robin_success'
-              ? apiKeyRoundRobinSwitchAfter
-              : null,
+            apiKeyStrategy === 'round_robin' || apiKeyStrategy === 'round_robin_success' ? apiKeyRoundRobinSwitchAfter : null,
           // Cookie edits (including clearing the saved cookie) travel through
           // the settings patch; mergeChannelSettingsForUpdate preserves the
           // field when the patch omits it and carries the null clear through.
@@ -1845,7 +1844,15 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           values.credentials?.keyGroups &&
           values.credentials.keyGroups.some((group) => (group.apiKeys || []).some((key) => (key || '').trim() !== ''));
 
-        if (!hasApiKey && !hasApiKeys && !hasKeyGroups && !hasManagementApiKey && !hasQuotaApiKey && !hasGcpCredentials && !hasVertexApiKeys) {
+        if (
+          !hasApiKey &&
+          !hasApiKeys &&
+          !hasKeyGroups &&
+          !hasManagementApiKey &&
+          !hasQuotaApiKey &&
+          !hasGcpCredentials &&
+          !hasVertexApiKeys
+        ) {
           delete updateInput.credentials;
         }
 
@@ -1875,9 +1882,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           ...quotaRoutingModeSettingsPatch(quotaRoutingMode),
           apiKeyStrategy,
           apiKeyRoundRobinSwitchAfter:
-            apiKeyStrategy === 'round_robin' || apiKeyStrategy === 'round_robin_success'
-              ? apiKeyRoundRobinSwitchAfter
-              : null,
+            apiKeyStrategy === 'round_robin' || apiKeyStrategy === 'round_robin_success' ? apiKeyRoundRobinSwitchAfter : null,
           ...(selectedApiFormat === 'zenmux/video' ||
           settingsForSubmit?.modelProtocols?.some((protocol) => protocol.apiFormats.includes('zenmux/video'))
             ? {
@@ -1983,7 +1988,8 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const openGroupModelsPanel = useCallback(
     (index: number, refreshedModels?: string[]) => {
       const own = form.getValues(`credentials.keyGroups.${index}.models`) || [];
-      const fetchedModels = refreshedModels ?? unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model);
+      const fetchedModels =
+        refreshedModels ?? unifiedFetchedModels.filter((entry) => entry.groupIndex === index).map((entry) => entry.model);
       const hasFetched = refreshedModels !== undefined || fetchedGroupModelIndexes.includes(index);
       const candidates = getGroupModelCandidates(own, fetchedModels, manualModels, hasFetched);
       setActiveGroupModelIndex(index);
@@ -2294,7 +2300,15 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
     setManualModels(nextManualModels);
     setSupportedModels(reconcileGroupedSupportedModels(nextGroups));
     closeGroupModelsPanel();
-  }, [activeGroupModelIndex, closeGroupModelsPanel, form, groupModelSelection, manualModels, unifiedFetchedModels, fetchedGroupModelIndexes]);
+  }, [
+    activeGroupModelIndex,
+    closeGroupModelsPanel,
+    form,
+    groupModelSelection,
+    manualModels,
+    unifiedFetchedModels,
+    fetchedGroupModelIndexes,
+  ]);
 
   return (
     <>
@@ -2318,6 +2332,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
             setPassThroughUserAgent(initialRow?.settings?.passThroughUserAgent ?? null);
             setPassThroughBody(initialRow?.settings?.passThroughBody ?? null);
             setQuotaRoutingMode(recallQuotaRoutingMode(initialRow?.settings));
+            setQuotaTestResult(null);
             setRetryableStatusCodesText(formatRetryableStatusCodes(initialRow?.settings?.retryableStatusCodes));
             setRetryableErrorPatternsText(formatRetryableErrorPatterns(initialRow?.settings?.retryableErrorPatterns));
             setMaxSingleChannelRetriesText(formatMaxSingleChannelRetries(initialRow?.settings?.maxSingleChannelRetries));
@@ -3014,9 +3029,9 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                       }))
                                   );
                                   setFetchedGroupModelIndexes((prev) =>
-                                    prev.filter((groupIndex) => groupIndex !== index).map((groupIndex) =>
-                                      groupIndex > index ? groupIndex - 1 : groupIndex
-                                    )
+                                    prev
+                                      .filter((groupIndex) => groupIndex !== index)
+                                      .map((groupIndex) => (groupIndex > index ? groupIndex - 1 : groupIndex))
                                   );
                                 }}
                                 onChangeName={(index, name) => {
@@ -3068,7 +3083,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                           </div>
                         )}
 
-<ApiKeyStrategyFields
+                      <ApiKeyStrategyFields
                         value={apiKeyStrategy}
                         switchAfter={apiKeyRoundRobinSwitchAfter}
                         onChange={(value) => setApiKeyStrategy(value)}
@@ -3127,20 +3142,37 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                   variant='outline'
                                   disabled={testChannelQuota.isPending || !form.watch('credentials.quotaApiKey')?.trim()}
                                   onClick={async () => {
+                                    setQuotaTestResult(null);
                                     try {
                                       const result = await testChannelQuota.mutateAsync({
                                         channelType: activeChannelType,
                                         baseURL: form.getValues('baseURL'),
                                         quotaApiKey: form.getValues('credentials.quotaApiKey') || '',
                                       });
+                                      setQuotaTestResult(result);
                                       toast.success(t('channels.dialogs.fields.quotaApiKey.testSuccess', { status: result.status }));
                                     } catch {
                                       // The shared mutation error handler displays the request failure.
                                     }
                                   }}
                                 >
-                                  {testChannelQuota.isPending ? t('common.buttons.processing') : t('channels.dialogs.fields.quotaApiKey.test')}
+                                  {testChannelQuota.isPending
+                                    ? t('common.buttons.processing')
+                                    : t('channels.dialogs.fields.quotaApiKey.test')}
                                 </Button>
+                                {quotaTestResult && (
+                                  <div className='bg-muted/20 rounded-md border p-3' data-testid='channel-quota-test-result'>
+                                    <div className='mb-2 flex items-center justify-between gap-2 text-xs'>
+                                      <span className='text-muted-foreground'>{t('channels.dialogs.fields.quotaApiKey.resultStatus')}</span>
+                                      <Badge variant={quotaTestResult.ready ? 'outline' : 'destructive'}>
+                                        {t(`quota.status.${quotaTestResult.status}`, {
+                                          defaultValue: quotaTestResult.status,
+                                        })}
+                                      </Badge>
+                                    </div>
+                                    <CompatibleQuotaSummary value={quotaTestResult.quotaData} />
+                                  </div>
+                                )}
                               </div>
                             </FormItem>
                           )}

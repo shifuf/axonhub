@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +69,8 @@ var providerQuotaChannelTypes = []channel.Type{
 	channel.TypeCline,
 	channel.TypeOpenai,
 	channel.TypeOpenaiResponses,
+	channel.TypeDeepseek,
+	channel.TypeDeepseekAnthropic,
 	channel.TypeOpencodeGo,
 	channel.TypeOpencodeGoAnthropic,
 	channel.TypeMoonshotCoding,
@@ -390,6 +393,7 @@ func (svc *ProviderQuotaService) registerProviderQuotaSupport() {
 	svc.registerZhipuSupport()
 	svc.registerZaiSupport()
 	svc.registerCharmHyperSupport()
+	svc.registerCompatibleSupport()
 	svc.registerCommandCodeSupport()
 	svc.registerOllamaSupport()
 }
@@ -478,6 +482,10 @@ func (svc *ProviderQuotaService) registerZaiSupport() {
 
 func (svc *ProviderQuotaService) registerCharmHyperSupport() {
 	svc.checkers["charm_hyper"] = provider_quota.NewCharmHyperQuotaChecker(svc.httpClient)
+}
+
+func (svc *ProviderQuotaService) registerCompatibleSupport() {
+	svc.checkers["compatible"] = provider_quota.NewCompatibleQuotaChecker(svc.httpClient)
 }
 
 func (svc *ProviderQuotaService) intervalToCronExpr(interval time.Duration) string {
@@ -793,6 +801,25 @@ func (svc *ProviderQuotaService) runQuotaCheck(ctx context.Context, force bool) 
 // That lets credential failures remove persisted and cached status atomically
 // with the rest of the quota collection state.
 func (svc *ProviderQuotaService) checkChannelQuota(ctx context.Context, group quotaCheckGroup, now time.Time) {
+	activeChannels := make([]*ent.Channel, 0, len(group.channels))
+	for _, member := range group.channels {
+		if member == nil {
+			continue
+		}
+		if svc.quotaRoutingMode(ctx, member) == objects.QuotaRoutingModeIgnoreQuota {
+			if err := svc.invalidateChannelQuotaLocked(ctx, member.ID); err != nil {
+				log.Error(ctx, "Failed to clear skipped provider quota",
+					log.Int("channel_id", member.ID),
+					log.Cause(err))
+			}
+			continue
+		}
+		activeChannels = append(activeChannels, member)
+	}
+	if len(activeChannels) == 0 {
+		return
+	}
+	group.channels = activeChannels
 	ch := group.channels[0]
 	providerType := svc.getProviderType(ch)
 	if providerType == "" {
@@ -913,13 +940,6 @@ func (svc *ProviderQuotaService) TestQuota(ctx context.Context, channelType chan
 	if !supportsQuotaAPIKey(channelType) {
 		return provider_quota.QuotaData{}, fmt.Errorf("quota token checks are not supported for channel type %q", channelType)
 	}
-	if channelType == channel.TypeOpenai || channelType == channel.TypeOpenaiResponses {
-		providerType := provider_quota.DetectProviderFromURL(strings.TrimSpace(baseURL))
-		if _, ok := provider_quota.URLDetectedProviders()[providerType]; !ok {
-			return provider_quota.QuotaData{}, errors.New("quota token checks are not supported for this OpenAI-compatible URL")
-		}
-	}
-
 	ch := &ent.Channel{
 		Type:    channelType,
 		BaseURL: strings.TrimSpace(baseURL),
@@ -954,7 +974,8 @@ func supportsQuotaAPIKey(channelType channel.Type) bool {
 		channel.TypeZai, channel.TypeZaiAnthropic,
 		channel.TypeOpencodeGo, channel.TypeOpencodeGoAnthropic,
 		channel.TypeMoonshotCoding,
-		channel.TypeOpenai, channel.TypeOpenaiResponses:
+		channel.TypeOpenai, channel.TypeOpenaiResponses,
+		channel.TypeDeepseek, channel.TypeDeepseekAnthropic:
 		return true
 	default:
 		return false
@@ -1126,7 +1147,15 @@ func (svc *ProviderQuotaService) getProviderType(ch *ent.Channel) string {
 	case channel.TypeCline:
 		return "cline"
 	case channel.TypeOpenai, channel.TypeOpenaiResponses:
-		return provider_quota.DetectProviderFromURL(ch.BaseURL)
+		if providerType := provider_quota.DetectProviderFromURL(ch.BaseURL); providerType != "" {
+			return providerType
+		}
+		if isCompatibleQuotaBaseURL(ch.BaseURL) {
+			return "compatible"
+		}
+		return ""
+	case channel.TypeDeepseek, channel.TypeDeepseekAnthropic:
+		return "compatible"
 	case channel.TypeOpencodeGo, channel.TypeOpencodeGoAnthropic:
 		return "opencode_go"
 	case channel.TypeMoonshotCoding:
@@ -1146,21 +1175,37 @@ func (svc *ProviderQuotaService) getProviderType(ch *ent.Channel) string {
 	}
 }
 
+func isCompatibleQuotaBaseURL(baseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https", "ws", "wss":
+		return true
+	default:
+		return false
+	}
+}
+
+func (svc *ProviderQuotaService) quotaRoutingMode(ctx context.Context, ch *ent.Channel) objects.QuotaRoutingMode {
+	if ch != nil && ch.Settings != nil && ch.Settings.QuotaRoutingMode != "" {
+		return ch.Settings.QuotaRoutingMode
+	}
+	if svc.SystemService == nil {
+		return objects.QuotaRoutingModeBackpressure
+	}
+	return svc.SystemService.QuotaRoutingSettingsOrDefault(ctx).DefaultMode
+}
+
 func hasCredentialsForProvider(ch *ent.Channel) bool {
 	switch ch.Type { //nolint:exhaustive // Only ZenMux uses the separate management credential.
 	case channel.TypeZenmux, channel.TypeZenmuxResponses, channel.TypeZenmuxAnthropic, channel.TypeZenmuxGemini, channel.TypeZenmuxVideo:
 		return strings.TrimSpace(ch.Credentials.ManagementAPIKey) != ""
 	default:
 	}
-	if supportsQuotaAPIKey(ch.Type) && !(ch.Type == channel.TypeOpenai || ch.Type == channel.TypeOpenaiResponses) {
+	if supportsQuotaAPIKey(ch.Type) {
 		return strings.TrimSpace(ch.Credentials.QuotaAPIKey) != ""
-	}
-
-	if ch.Type == channel.TypeOpenai || ch.Type == channel.TypeOpenaiResponses {
-		providerType := provider_quota.DetectProviderFromURL(ch.BaseURL)
-		if _, ok := provider_quota.URLDetectedProviders()[providerType]; ok {
-			return strings.TrimSpace(ch.Credentials.QuotaAPIKey) != ""
-		}
 	}
 
 	if isCommandCodeChannelType(ch.Type) {

@@ -24,7 +24,7 @@ func TestProviderQuotaService_RegistryCoverageMatrix(t *testing.T) {
 		"apertis", "antigravity", "charm_hyper", "claudecode", "cline", "codex",
 		"commandcode", "github_copilot", "kimi_code", "minimax", "nanogpt",
 		"neuralwatt", "opencode_go", "synthetic", "xai_subscription",
-		"ollama", "zenmux", "zhipu", "zai",
+		"ollama", "zenmux", "zhipu", "zai", "compatible",
 	}
 	require.ElementsMatch(t, expectedCheckers, mapKeys(svc.checkers))
 
@@ -63,6 +63,10 @@ func TestProviderQuotaService_RegistryCoverageMatrix(t *testing.T) {
 		{"zai", channel.TypeZaiAnthropic, ""},
 		{"charm_hyper", channel.TypeOpenai, "https://hyper.charm.land"},
 		{"charm_hyper", channel.TypeOpenaiResponses, "https://hyper.charm.land"},
+		{"compatible", channel.TypeOpenai, "https://relay.example.com/v1"},
+		{"compatible", channel.TypeOpenaiResponses, "https://relay.example.com/v1"},
+		{"compatible", channel.TypeDeepseek, "https://api.deepseek.com/v1"},
+		{"compatible", channel.TypeDeepseekAnthropic, "https://api.deepseek.com/v1"},
 		{"commandcode", channel.TypeCommandcode, ""},
 		{"commandcode", channel.TypeCommandcodeAnthropic, ""},
 		{"ollama", channel.TypeOllama, ""},
@@ -85,6 +89,9 @@ func TestProviderQuotaService_RegistryCoverageMatrix(t *testing.T) {
 					Ollama: &objects.OllamaQuotaSettings{AuthCookie: "fixture-cookie"},
 				},
 			}
+		}
+		if relation.checker == "compatible" {
+			quotaChannel.Credentials = objects.ChannelCredentials{APIKey: "quota-token"}
 		}
 		providerType := svc.getProviderType(quotaChannel)
 		require.Equal(t, relation.checker, providerType, key)

@@ -6,8 +6,9 @@
 
 ## 角色与约束
 - 仓库 deploy/axonhub-update.sh 是唯一更新入口，不要重新发明流程
-- 默认不拉镜像（PULL_IMAGES 默认 0，避免国内 ghcr.io 超时）；镜像通过代码
-  push 到 dev 分支后由 GitHub Actions 构建，服务器只需要换 tag 重建
+- 默认走 Release 镜像归档：release.yml 构建 linux/amd64 镜像，
+  `docker save` 后上传版本化归档、稳定别名和 SHA256；脚本经 gh-proxy 下载、
+  校验、`docker load`，全程不依赖从 ghcr.io 拉镜像
 - 更新前必须在线备份（pg_dump / SQLite 拷贝到 backups/）；失败自动回滚旧镜像
 - /health 通过才算成功；更新后提醒我浏览器 Ctrl+F5 强刷
 
@@ -23,7 +24,7 @@
    → 触发 docker-publish.yml 自动构建 ghcr.io/shifuf/axonhub:latest 和 dev-<sha>
 4. 发 Release：写 RELEASE_NOTES_vX.Y.Z.md（Highlights 分块、镜像 tag、
    升级说明、测试结果），打 tag v*（不能与已有 tag 撞名，先 git tag -l 检查），
-   push tag 触发 release.yml（goreleaser 多平台二进制 + dist.tar.gz）
+   push tag 触发 release.yml（goreleaser 多平台二进制 + Docker 镜像归档）
 5. 输出给服务器的更新命令（见任务 B）
 
 ## 任务 B：服务器侧一键更新命令（输出给用户）
@@ -32,8 +33,9 @@
     curl -fSL --connect-timeout 10 --max-time 60 -o axonhub-update.sh \
       "https://gh-proxy.com/https://raw.githubusercontent.com/shifuf/axonhub/dev/deploy/axonhub-update.sh"
     sed -i 's/\r$//' axonhub-update.sh && chmod +x axonhub-update.sh
-    # 日常更新
-    bash axonhub-update.sh              # latest
+    # 日常更新（国内下载 Release 镜像归档）
+    bash axonhub-update.sh              # 最新稳定 Release
+    bash axonhub-update.sh vX.Y.Z       # 固定版本（推荐）
     bash axonhub-update.sh dev-<sha>    # 锁定某次构建
     # 验证
     curl http://127.0.0.1:8090/health
@@ -42,8 +44,9 @@
 - /health 不通过：先看 docker compose logs --tail 50 axonhub；
   确认 .env 里 AXONHUB_IMAGE tag 存在于 ghcr（ghcr.nju.edu.cn/shifuf/axonhub 可镜像访问）
 - 迁移报错：确认是新表/新列（Ent 自动迁移）；SQLite 场景先用 backups/*.db 恢复再定位
-- 卡在 pull：脚本默认已跳过 pull；如需拉镜像用 PULL_IMAGES=1 且可换
-  ghcr.nju.edu.cn/shifuf/axonhub 源
+- 卡在 pull：v* / latest 模式不使用 pull，而是下载 Release 归档后 docker load；
+  只有 dev-* 或 USE_REGISTRY=1 才走 registry
+- Release 下载卡住：确认 gh-proxy 可用；可临时 `RELEASE_PROXY= bash ...` 直连
 - 回滚：cp .env.bak.<stamp> .env && docker compose up -d --force-recreate axonhub
 - 数据恢复：Postgres psql < backups/axonhub-pg-<stamp>.sql；SQLite 用 backups/*.db 覆盖
 

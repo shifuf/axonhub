@@ -11,6 +11,7 @@ import (
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
+	"github.com/looplj/axonhub/internal/ent/providerquotastatus"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/server/biz/provider_quota"
 )
@@ -131,14 +132,18 @@ func TestProviderQuotaService_TestQuotaUsesUnsavedToken(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestProviderQuotaService_TestQuotaRejectsUnrecognizedOpenAIURL(t *testing.T) {
+func TestProviderQuotaService_TestQuotaUsesCompatibleCheckerForUnknownOpenAIURL(t *testing.T) {
 	service, _, _, client := setupProviderQuotaCollectionService(t)
 	defer client.Close()
+	checker := &credentialCaptureQuotaChecker{}
+	service.checkers["compatible"] = checker
 
-	_, err := service.TestQuota(t.Context(), channel.TypeOpenai, "https://unrecognized.example/v1", "temporary-token")
+	quota, err := service.TestQuota(t.Context(), channel.TypeOpenai, "https://unrecognized.example/v1", "temporary-token")
 
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not supported")
+	require.NoError(t, err)
+	require.Equal(t, "available", quota.Status)
+	require.Equal(t, 1, checker.calls)
+	require.Equal(t, "temporary-token", checker.quotaAPIKey)
 }
 
 func TestProviderQuotaService_TestQuotaRedactsTokenFromCheckerErrors(t *testing.T) {
@@ -150,6 +155,84 @@ func TestProviderQuotaService_TestQuotaRedactsTokenFromCheckerErrors(t *testing.
 
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "temporary-secret")
+}
+
+func TestProviderQuotaService_CheckChannelQuota_IgnoreModeSkipsCheckerAndClearsStatus(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+	checker := &credentialCaptureQuotaChecker{}
+	service.checkers["minimax"] = checker
+	channelEntity, err := client.Channel.Create().
+		SetName("Ignored MiniMax").
+		SetType(channel.TypeMinimax).
+		SetStatus(channel.StatusEnabled).
+		SetCredentials(objects.ChannelCredentials{QuotaAPIKey: "quota-key"}).
+		SetSettings(&objects.ChannelSettings{QuotaRoutingMode: objects.QuotaRoutingModeIgnoreQuota}).
+		SetSupportedModels([]string{"test-model"}).
+		SetDefaultTestModel("test-model").
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.ProviderQuotaStatus.Create().
+		SetChannelID(channelEntity.ID).
+		SetProviderType(providerquotastatus.ProviderTypeMinimax).
+		SetStatus(providerquotastatus.StatusAvailable).
+		SetReady(true).
+		SetQuotaData(map[string]any{"old": "quota"}).
+		SetNextCheckAt(time.Now().Add(-time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	service.checkChannelQuota(ctx, quotaCheckGroup{channels: []*ent.Channel{channelEntity}}, time.Now())
+
+	require.Zero(t, checker.calls)
+	_, err = client.ProviderQuotaStatus.Query().
+		Where(providerquotastatus.ChannelIDEQ(channelEntity.ID)).
+		Only(ctx)
+	require.True(t, ent.IsNotFound(err))
+}
+
+func TestProviderQuotaService_CheckChannelQuota_MixedGroupDoesNotSaveIgnoredMember(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+	checker := &credentialCaptureQuotaChecker{}
+	service.checkers["minimax"] = checker
+	ignored, err := client.Channel.Create().
+		SetName("Ignored MiniMax").
+		SetType(channel.TypeMinimax).
+		SetStatus(channel.StatusEnabled).
+		SetCredentials(objects.ChannelCredentials{QuotaAPIKey: "ignored-key"}).
+		SetSettings(&objects.ChannelSettings{QuotaRoutingMode: objects.QuotaRoutingModeIgnoreQuota}).
+		SetSupportedModels([]string{"test-model"}).
+		SetDefaultTestModel("test-model").
+		Save(ctx)
+	require.NoError(t, err)
+	active, err := client.Channel.Create().
+		SetName("Active MiniMax").
+		SetType(channel.TypeMinimax).
+		SetStatus(channel.StatusEnabled).
+		SetCredentials(objects.ChannelCredentials{QuotaAPIKey: "active-key"}).
+		SetSettings(&objects.ChannelSettings{QuotaRoutingMode: objects.QuotaRoutingModeBackpressure}).
+		SetSupportedModels([]string{"test-model"}).
+		SetDefaultTestModel("test-model").
+		Save(ctx)
+	require.NoError(t, err)
+
+	service.checkChannelQuota(ctx, quotaCheckGroup{
+		channels:   []*ent.Channel{ignored, active},
+		accountKey: "shared-account",
+	}, time.Now())
+
+	require.Equal(t, 1, checker.calls)
+	require.Equal(t, "active-key", checker.quotaAPIKey)
+	_, err = client.ProviderQuotaStatus.Query().
+		Where(providerquotastatus.ChannelIDEQ(ignored.ID)).
+		Only(ctx)
+	require.True(t, ent.IsNotFound(err))
+	status, err := client.ProviderQuotaStatus.Query().
+		Where(providerquotastatus.ChannelIDEQ(active.ID)).
+		Only(ctx)
+	require.NoError(t, err)
+	require.Equal(t, providerquotastatus.StatusAvailable, status.Status)
 }
 
 type quotaErrorChecker struct{ err error }

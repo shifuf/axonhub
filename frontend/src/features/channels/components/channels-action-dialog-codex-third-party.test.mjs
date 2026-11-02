@@ -20,7 +20,13 @@ let dialogHelpers;
 async function loadDialogHelpers() {
   if (dialogHelpers) return dialogHelpers;
 
-  const helperNames = ['isOfficialCodexChannel', 'getCodexThirdPartySubmitCredentials', 'getFetchModelsApiKey', 'getCodexThirdPartyCredentialError', 'parseOauthToken'];
+  const helperNames = [
+    'isOfficialCodexChannel',
+    'getCodexThirdPartySubmitCredentials',
+    'getFetchModelsApiKey',
+    'getCodexThirdPartyCredentialError',
+    'parseOauthToken',
+  ];
   const helperNodes = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && helperNames.includes(node.name?.text));
   assert.equal(helperNodes.length, helperNames.length, 'Codex credential-mode helpers must stay in channels-action-dialog.tsx');
 
@@ -58,17 +64,30 @@ test('a copied OAuth row switched to third-party submits no OAuth JSON and keeps
 
   // The submit payload itself must be the sanitized credential.
   assert.match(submit, /const valuesForSubmit = isEdit/);
-  assert.match(submit, /credentials:\s*credentials\s*\n\s*\? getCodexThirdPartySubmitCredentials\(\{[\s\S]*?quotaApiKey: supportsQuotaAPIKey \? credentials\.quotaApiKey\?\.trim\(\)/);
+  assert.match(
+    submit,
+    /credentials:\s*credentials\s*\n\s*\? getCodexThirdPartySubmitCredentials\(\s*\{[\s\S]*?quotaApiKey: supportsQuotaAPIKey \? credentials\.quotaApiKey\?\.trim\(\)/
+  );
   assert.match(submit, /type: valuesForSubmit\.type,/);
 });
 
 test('a third-party Codex channel with a synthetic plain key fetches models with that key, not the inherited OAuth JSON', async () => {
   const { getFetchModelsApiKey } = await loadDialogHelpers();
 
-  const plainKey = getFetchModelsApiKey({ type: 'codex', authMode: 'third-party', oauthApiKey: OAUTH_JSON, apiKeys: ['sk-synthetic-third-party'] });
+  const plainKey = getFetchModelsApiKey({
+    type: 'codex',
+    authMode: 'third-party',
+    oauthApiKey: OAUTH_JSON,
+    apiKeys: ['sk-synthetic-third-party'],
+  });
   assert.equal(plainKey, 'sk-synthetic-third-party', 'third-party fetch must send the plain API key');
 
-  const authJSONThirdParty = getFetchModelsApiKey({ type: 'codex', authMode: 'third-party', oauthApiKey: AUTH_JSON, apiKeys: ['sk-synthetic-third-party'] });
+  const authJSONThirdParty = getFetchModelsApiKey({
+    type: 'codex',
+    authMode: 'third-party',
+    oauthApiKey: AUTH_JSON,
+    apiKeys: ['sk-synthetic-third-party'],
+  });
   assert.equal(authJSONThirdParty, 'sk-synthetic-third-party', 'auth.json must not leak when the row is switched to third-party');
 
   // The fork fetches models per key group; each probe must still go through the
@@ -84,12 +103,20 @@ test('official and auth.json Codex channels still submit and fetch their OAuth c
   for (const authMode of ['official', 'auth-json']) {
     const submitted = getCodexThirdPartySubmitCredentials(credentials, { type: 'codex', authMode });
     assert.equal(submitted, credentials, `${authMode} must submit the OAuth credential unchanged`);
-    assert.equal(getFetchModelsApiKey({ type: 'codex', authMode, oauthApiKey: OAUTH_JSON, apiKeys: [] }), OAUTH_JSON, `${authMode} must fetch with the OAuth credential`);
+    assert.equal(
+      getFetchModelsApiKey({ type: 'codex', authMode, oauthApiKey: OAUTH_JSON, apiKeys: [] }),
+      OAUTH_JSON,
+      `${authMode} must fetch with the OAuth credential`
+    );
   }
 
   // auth.json mode keeps sending the converted OAuth JSON and the preset URL.
   const { isOfficialCodexChannel } = await loadDialogHelpers();
-  assert.equal(isOfficialCodexChannel({ credentials: { apiKey: AUTH_JSON } }), true, 'auth.json must stay recognized as an official credential');
+  assert.equal(
+    isOfficialCodexChannel({ credentials: { apiKey: AUTH_JSON } }),
+    true,
+    'auth.json must stay recognized as an official credential'
+  );
   const submit = between('const onSubmit = async', 'const addModel = () =>');
   assert.match(submit, /const baseURL = getDefaultBaseURL\(currentType\);/);
 });
@@ -100,7 +127,10 @@ test('non-Codex providers keep their OAuth credential preference when fetching m
     getFetchModelsApiKey({ type: 'github_copilot', authMode: 'third-party', oauthApiKey: OAUTH_JSON, apiKeys: ['sk-synthetic'] }),
     OAUTH_JSON
   );
-  assert.equal(getFetchModelsApiKey({ type: 'codex', authMode: 'third-party', oauthApiKey: '', apiKeys: ['  sk-synthetic  '] }), 'sk-synthetic');
+  assert.equal(
+    getFetchModelsApiKey({ type: 'codex', authMode: 'third-party', oauthApiKey: '', apiKeys: ['  sk-synthetic  '] }),
+    'sk-synthetic'
+  );
 });
 
 test('an empty or OAuth-JSON third-party credential is rejected instead of saved', async () => {

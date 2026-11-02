@@ -5,8 +5,8 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import ts from 'typescript';
 import { pathToFileURL } from 'node:url';
+import ts from 'typescript';
 
 const require = createRequire(import.meta.url);
 
@@ -24,14 +24,17 @@ test('dedicated quota token is submitted by channel forms and has an unsaved tes
   assert.match(channels, /mutation TestChannelQuota\([\s\S]*?quotaApiKey: String!/);
   assert.match(dialog, /name='credentials\.quotaApiKey'/);
   assert.match(dialog, /testChannelQuota\.mutateAsync\(\{[\s\S]*?form\.getValues\('credentials\.quotaApiKey'\)/);
+  assert.match(dialog, /setQuotaTestResult\(result\)/);
+  assert.match(dialog, /data-testid='channel-quota-test-result'/);
+  assert.match(dialog, /<CompatibleQuotaSummary value=\{quotaTestResult\.quotaData\}/);
   assert.match(dialog, /hasQuotaApiKey[\s\S]*?delete updateInput\.credentials/);
 });
 
-test('OpenAI-compatible quota-token controls are limited to known quota-provider hosts', () => {
+test('OpenAI-compatible and DeepSeek channels expose the dedicated quota-token control', () => {
   const dialog = read('../components/channels-action-dialog.tsx');
 
-  assert.match(dialog, /api\\\.\(\?:synthetic\\\.new\|neuralwatt\\\.com\|apertis\\\.ai\)/);
-  assert.match(dialog, /\|hyper\\\.charm\\\.land\)\$/);
+  assert.match(dialog, /'openai',\s*'openai_responses',\s*'deepseek',\s*'deepseek_anthropic'/);
+  assert.doesNotMatch(dialog, /known quota-provider hosts|synthetic\\\.new\|neuralwatt/);
 });
 
 test('quota-token test result schema accepts the existing provider quota payload', async () => {

@@ -8,8 +8,10 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { CompatibleQuotaSummary } from '@/components/compatible-quota-summary';
 import type { ChannelQuotaRoutingMode } from '@/features/channels/data/schema';
 import { getChannelQuotaRoutingIndicator } from '@/features/channels/utils/quota-routing-status';
+import { parseCompatibleQuotaDisplay } from '@/features/system/data/compatible-quota-display';
 import {
   useProviderQuotaStatuses,
   ProviderQuotaChannel,
@@ -228,6 +230,12 @@ function getChannelPercentage(channel: ProviderQuotaChannel): number {
   } else if (channel.type === 'zhipu' || channel.type === 'zhipu_anthropic' || channel.type === 'zai' || channel.type === 'zai_anthropic') {
     const qd = channel.quotaStatus.quotaData as ProviderZhipuQuotaData | undefined;
     percentage = Math.max(0, ...(qd?.rows ?? []).map((row) => row.usedPercent));
+  } else if (channel.providerType === 'compatible') {
+    const summary = parseCompatibleQuotaDisplay(channel.quotaStatus.quotaData);
+    percentage =
+      summary?.usedRatio !== undefined
+        ? summary.usedRatio * 100
+        : Math.max(0, ...channel.quotaStatus.limits.map((limit) => limit.usageRatio * 100));
   } else if (isOpenaiType(channel.type) && channel.providerType === 'synthetic') {
     const qd = channel.quotaStatus.quotaData as ProviderSyntheticQuotaData | undefined;
     const weeklyPct = qd?.planWeeklyLimit?.percentRemaining ?? qd?.weeklyTokenLimit?.percentRemaining ?? 100;
@@ -2402,7 +2410,15 @@ function QuotaRow({ channel, effectiveMode }: { channel: ProviderQuotaChannel; e
         </div>
       )}
 
-      <PeriodQuotaEstimate limits={quota.limits} currency={channel.providerType === 'synthetic' ? 'USD' : undefined} />
+      {channel.providerType === 'compatible' && (
+        <div className='bg-muted/20 mt-3 rounded-md border p-3'>
+          <CompatibleQuotaSummary value={channel.quotaStatus.quotaData} />
+        </div>
+      )}
+
+      {channel.providerType !== 'compatible' && (
+        <PeriodQuotaEstimate limits={quota.limits} currency={channel.providerType === 'synthetic' ? 'USD' : undefined} />
+      )}
     </div>
   );
 }
@@ -2486,7 +2502,11 @@ function getChannelCategory(channel: ProviderQuotaChannel, t: ReturnType<typeof 
   if (isOpenaiType(channelType)) {
     if (channel.providerType) {
       const p = channel.providerType;
-      return { key: p, label: p.charAt(0).toUpperCase() + p.slice(1), order: 15 };
+      return {
+        key: p,
+        label: p === 'compatible' ? t('quota.provider.compatible') : p.charAt(0).toUpperCase() + p.slice(1),
+        order: 15,
+      };
     }
     return { key: 'openai', label: t('channels.types.openai') || 'OpenAI', order: 16 };
   }
@@ -2521,7 +2541,7 @@ export function QuotaBadges({ isRefreshing, onRefresh }: { isRefreshing: boolean
       if (!existing) {
         acc.push(channel);
       }
-    } else if (isOpenaiType(channel.type) && channel.providerType) {
+    } else if (isOpenaiType(channel.type) && channel.providerType && channel.providerType !== 'compatible') {
       const existing = acc.find((c) => isOpenaiType(c.type) && c.providerType === channel.providerType);
       if (!existing) {
         acc.push(channel);

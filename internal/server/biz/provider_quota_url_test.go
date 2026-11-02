@@ -21,7 +21,7 @@ func TestGetProviderType_OpenaiWithUnknownURL(t *testing.T) {
 		BaseURL: "https://api.unknown.com",
 	}
 	result := svc.getProviderType(ch)
-	require.Equal(t, "", result)
+	require.Equal(t, "compatible", result)
 }
 
 func TestGetProviderType_ExistingTypesPreserved(t *testing.T) {
@@ -249,7 +249,7 @@ func TestGetProviderType_OpenaiWithFalsePositiveURL(t *testing.T) {
 		BaseURL: "https://fakeapi.synthetic.new",
 	}
 	result := svc.getProviderType(ch)
-	require.Equal(t, "", result)
+	require.Equal(t, "compatible", result)
 }
 
 func TestGetProviderType_Cline(t *testing.T) {

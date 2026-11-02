@@ -1,16 +1,18 @@
 #!/bin/bash
-# AxonHub one-shot seamless updater for Baota managed Docker deployments.
+# AxonHub one-shot updater for existing Docker Compose deployments.
 #
 # Usage:
-#   bash axonhub-update.sh              # update to latest
-#   bash axonhub-update.sh dev-1bc55dd  # pin a specific image tag
+#   bash axonhub-update.sh                 # latest stable release archive
+#   bash axonhub-update.sh v1.0.0-beta14   # exact release archive
+#   bash axonhub-update.sh dev-1bc55dd     # legacy ghcr dev image
 #
 # Env:
-#   AXONHUB_DIR    deployment directory (default: auto-detect /www/wwwroot/axonhub)
-#   IMAGE          full image reference (default: ghcr.io/shifuf/axonhub:latest)
-#   PULL_IMAGES    set to 1 to run "docker compose pull" first (default: skip,
-#                  avoids ghcr.io timeouts in mainland networks)
-#   SKIP_BACKUP    set to 1 to skip the pre-update backup (not recommended)
+#   AXONHUB_DIR     deployment directory (default: auto-detect)
+#   IMAGE           explicit image reference (registry mode)
+#   USE_REGISTRY=1  force registry mode for a v* tag
+#   RELEASE_PROXY   release download proxy (default: https://gh-proxy.com/)
+#   PULL_IMAGES=1   run docker compose pull in registry mode
+#   SKIP_BACKUP=1   skip the pre-update backup (not recommended)
 
 set -uo pipefail
 
@@ -20,14 +22,16 @@ ok()    { echo -e "${GREEN}[OK]${NC} $1" >&2; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1" >&2; }
 fail()  { echo -e "${RED}[FAIL]${NC} $1" >&2; exit 1; }
 
+GITHUB_REPO="${GITHUB_REPO:-shifuf/axonhub}"
 DEFAULT_IMAGE="ghcr.io/shifuf/axonhub:latest"
+RELEASE_PROXY="${RELEASE_PROXY-https://gh-proxy.com/}"
 AXONHUB_DIR="${AXONHUB_DIR:-}"
 IMAGE="${IMAGE:-}"
-VERSION_ARG="${1:-}"
+TARGET="${1:-latest}"
+USE_REGISTRY="${USE_REGISTRY:-0}"
 PULL_IMAGES="${PULL_IMAGES:-0}"
 SKIP_BACKUP="${SKIP_BACKUP:-0}"
 
-# ---------------------------------------------------------------- locate deploy dir
 find_deploy_dir() {
   local candidates=(
     "${AXONHUB_DIR}"
@@ -59,6 +63,7 @@ COMPOSE_FILE="docker-compose.yml"
 [ -f "$COMPOSE_FILE" ] || fail "no docker-compose.yml in $AXONHUB_DIR"
 
 command -v docker >/dev/null 2>&1 || fail "docker not found"
+command -v curl >/dev/null 2>&1 || fail "curl not found"
 if docker compose version >/dev/null 2>&1; then
   dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
 else
@@ -67,37 +72,22 @@ else
 fi
 info "deploy dir: $AXONHUB_DIR"
 
-# ---------------------------------------------------------------- resolve target image
-# This updater always targets the FORK image (shifuf/axonhub): deployments
-# that still run the upstream image get switched over on the first run.
-# CURRENT_IMAGE (from the old .env) is only kept for rollback.
-if [ -f ".env" ] && grep -q '^AXONHUB_IMAGE=' .env; then
-  CURRENT_IMAGE="$(grep '^AXONHUB_IMAGE=' .env | head -n1 | cut -d= -f2-)"
-else
-  CURRENT_IMAGE="$DEFAULT_IMAGE"
+APP_CID="$(dc ps -q axonhub 2>/dev/null | head -n1)"
+CURRENT_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$APP_CID" 2>/dev/null || true)"
+if [ -z "$CURRENT_IMAGE" ] && [ -f ".env" ]; then
+  CURRENT_IMAGE="$(grep '^AXONHUB_IMAGE=' .env 2>/dev/null | head -n1 | cut -d= -f2- || true)"
 fi
+[ -n "$CURRENT_IMAGE" ] || CURRENT_IMAGE="$DEFAULT_IMAGE"
+REGISTRY_REPO="${CURRENT_IMAGE%%:*}"
+case "$REGISTRY_REPO" in
+  *axonhub*) ;;
+  *) REGISTRY_REPO="ghcr.io/shifuf/axonhub" ;;
+esac
 
-# Keep a mirror registry the operator already configured (e.g.
-# ghcr.nju.edu.cn): only the TAG is derived from the argument/default,
-# so a script run never rewrites the registry back to ghcr.io.
-REGISTRY_REPO="${DEFAULT_IMAGE%%:*}"
-if [ -n "$CURRENT_IMAGE" ]; then
-  REGISTRY_REPO="${CURRENT_IMAGE%%:*}"
-fi
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/axonhub-update.XXXXXX")" || fail "cannot create temp dir"
+cleanup() { rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
 
-if [ -n "$IMAGE" ]; then
-  NEW_IMAGE="$IMAGE"
-elif [ -n "$VERSION_ARG" ]; then
-  case "$VERSION_ARG" in
-    dev-*) NEW_IMAGE="${REGISTRY_REPO}:${VERSION_ARG}" ;;
-    *)     NEW_IMAGE="${REGISTRY_REPO}:${VERSION_ARG#v}" ;;
-  esac
-else
-  NEW_IMAGE="${REGISTRY_REPO}:latest"
-fi
-info "target image: $NEW_IMAGE"
-
-# ---------------------------------------------------------------- backup
 backup_stamp="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$AXONHUB_DIR/backups"
 mkdir -p "$BACKUP_DIR"
@@ -105,9 +95,6 @@ mkdir -p "$BACKUP_DIR"
 if [ "$SKIP_BACKUP" != "1" ]; then
   info "online backup..."
   if dc ps --quiet postgres 2>/dev/null | grep -q .; then
-    # docker exec lands as root; local peer auth would prompt for a password
-    # and hang forever in -T mode. Pass PGPASSWORD explicitly and hard-timeout
-    # the dump so a stuck auth can never freeze the whole update.
     if timeout 180 dc exec -T postgres sh -lc 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
       > "$BACKUP_DIR/axonhub-pg-$backup_stamp.sql"; then
       gzip -f "$BACKUP_DIR/axonhub-pg-$backup_stamp.sql" \
@@ -129,10 +116,114 @@ else
   warn "backup skipped (SKIP_BACKUP=1)"
 fi
 
-# ---------------------------------------------------------------- write image tag
-# Some older deployments hardcode the image (e.g. "image: looplj/axonhub:latest")
-# in the compose file, which silently ignores AXONHUB_IMAGE from .env. Migrate
-# such files to the variable form once, then the tag swap below works forever.
+proxy_url() {
+  local url="$1"
+  if [ -z "$RELEASE_PROXY" ]; then
+    printf '%s\n' "$url"
+  else
+    printf '%s/%s\n' "${RELEASE_PROXY%/}" "$url"
+  fi
+}
+
+download_with_fallback() {
+  local url="$1"
+  local output="$2"
+  local candidate
+  if [ -n "$RELEASE_PROXY" ]; then
+    candidate="$(proxy_url "$url")"
+    info "download (mirror): $candidate"
+    if curl -fSL --connect-timeout 10 --max-time 600 -o "$output" "$candidate"; then
+      return 0
+    fi
+    warn "mirror download failed, retrying GitHub directly"
+  fi
+  info "download: $url"
+  curl -fSL --connect-timeout 10 --max-time 1800 -o "$output" "$url"
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+load_release_image() {
+  local tag="$1"
+  local archive_name
+  local release_url
+  local archive_file="$TMP_DIR/axonhub-image.tar.gz"
+  local checksum_file="$TMP_DIR/axonhub-image.sha256"
+
+  if [ "$tag" = "latest" ]; then
+    archive_name="axonhub-linux-amd64.tar.gz"
+    release_url="https://github.com/$GITHUB_REPO/releases/latest/download/$archive_name"
+  else
+    archive_name="axonhub-${tag}-linux-amd64.tar.gz"
+    release_url="https://github.com/$GITHUB_REPO/releases/download/${tag}/$archive_name"
+  fi
+
+  info "release image: $archive_name"
+  download_with_fallback "$release_url" "$archive_file" || fail "release image download failed"
+  download_with_fallback "${release_url}.sha256" "$checksum_file" || fail "release checksum download failed"
+
+  local expected actual
+  expected="$(awk 'NF {print $1; exit}' "$checksum_file")"
+  actual="$(sha256_of "$archive_file")"
+  [ -n "$expected" ] || fail "release checksum is empty"
+  [ "$expected" = "$actual" ] || fail "release checksum mismatch (expected $expected, got $actual)"
+  ok "sha256 verified"
+
+  local load_output loaded_image
+  load_output="$(docker load -i "$archive_file" 2>&1)" || {
+    printf '%s\n' "$load_output" >&2
+    fail "docker load failed"
+  }
+  printf '%s\n' "$load_output" >&2
+  loaded_image="$(printf '%s\n' "$load_output" | sed -n 's/^Loaded image: //p' | tail -n1)"
+
+  if [ -z "$loaded_image" ] && [ "$tag" != "latest" ]; then
+    loaded_image="ghcr.io/shifuf/axonhub:$tag"
+  fi
+  [ -n "$loaded_image" ] || fail "could not determine the image tag inside the release archive"
+  [ "$(docker image inspect -f '{{.Id}}' "$loaded_image" 2>/dev/null || true)" != "" ] \
+    || fail "release image was loaded but not found locally: $loaded_image"
+
+  NEW_IMAGE="$loaded_image"
+}
+
+resolve_registry_image() {
+  local tag="$1"
+  if [ -n "$IMAGE" ]; then
+    NEW_IMAGE="$IMAGE"
+  elif [ "$tag" = "latest" ]; then
+    NEW_IMAGE="${REGISTRY_REPO}:latest"
+  else
+    NEW_IMAGE="${REGISTRY_REPO}:${tag}"
+  fi
+}
+
+case "$TARGET" in
+  latest|v*)
+    if [ -n "$IMAGE" ] || [ "$USE_REGISTRY" = "1" ]; then
+      resolve_registry_image "$TARGET"
+      REGISTRY_MODE=1
+    else
+      load_release_image "$TARGET"
+      REGISTRY_MODE=0
+    fi
+    ;;
+  dev-*)
+    resolve_registry_image "$TARGET"
+    REGISTRY_MODE=1
+    ;;
+  *)
+    fail "unsupported target '$TARGET' (use latest, vX.Y.Z, or dev-<sha>)"
+    ;;
+esac
+info "target image: $NEW_IMAGE"
+
 if ! grep -q "AXONHUB_IMAGE" "$COMPOSE_FILE"; then
   if grep -Eq "^\s*image:.*axonhub" "$COMPOSE_FILE"; then
     warn "compose file hardcodes the axonhub image; migrating to \${AXONHUB_IMAGE}"
@@ -150,36 +241,28 @@ else
 fi
 ok ".env -> $NEW_IMAGE"
 
-# ---------------------------------------------------------------- recreate container
 info "recreating container..."
-if [ "$PULL_IMAGES" = "1" ]; then
+if [ "$REGISTRY_MODE" = "1" ] && [ "$PULL_IMAGES" = "1" ]; then
   dc pull --ignore-pull-failures || warn "image pull failed (common in CN), continuing with local image"
 fi
-dc up -d --force-recreate --no-deps axonhub || fail "container recreate failed"
+AXONHUB_IMAGE="$NEW_IMAGE" dc up -d --force-recreate --no-deps axonhub || fail "container recreate failed"
 
-# Compose reads .env only when the variable is not already set in the shell;
-# a stale AXONHUB_IMAGE exported in the caller would silently win. Verify
-# what actually runs and, on mismatch, force the image explicitly.
 sleep 2
 APP_CID="$(dc ps -q axonhub)"
 RUNNING_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$APP_CID" 2>/dev/null || true)"
 if [ "$RUNNING_IMAGE" != "$NEW_IMAGE" ]; then
-  warn "container runs \"$RUNNING_IMAGE\", expected \"$NEW_IMAGE\" — forcing image explicitly"
-  AXONHUB_IMAGE="$NEW_IMAGE" docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps axonhub \
+  warn "container runs \"$RUNNING_IMAGE\", expected \"$NEW_IMAGE\"; retrying with explicit image"
+  AXONHUB_IMAGE="$NEW_IMAGE" dc up -d --force-recreate --no-deps axonhub \
     || fail "forced recreate with explicit image failed"
   APP_CID="$(dc ps -q axonhub)"
   RUNNING_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$APP_CID" 2>/dev/null || true)"
 fi
 info "container image: $RUNNING_IMAGE"
-[ "$RUNNING_IMAGE" = "$NEW_IMAGE" ] || warn "container image still differs from target; check compose project name (docker compose ls)"
+[ "$RUNNING_IMAGE" = "$NEW_IMAGE" ] || warn "container image differs from target; check docker compose project name"
 
-# ---------------------------------------------------------------- health check + rollback
-# Verify the RUNNING container, not the shell host: use the container IP
-# (works even when the port is bound to 127.0.0.1 or a custom interface),
-# and fall back to the host port when docker inspect fails.
 HOST_PORT="$(grep -oP 'AXONHUB_HOST_PORT=\K[0-9]+' .env 2>/dev/null || echo 8090)"
-APP_CONTAINER="$(dc ps --quiet axonhub | head -n1)"
-CONTAINER_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$APP_CONTAINER" 2>/dev/null | awk '{print $1}')"
+BIND_ADDRESS="$(grep '^AXONHUB_BIND_ADDRESS=' .env 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+CONTAINER_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$APP_CID" 2>/dev/null | awk '{print $1}')"
 health_url="http://127.0.0.1:${HOST_PORT}/health"
 [ -n "$CONTAINER_IP" ] && health_url="http://${CONTAINER_IP}:8090/health"
 info "health check $health_url ..."
@@ -189,27 +272,18 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 
-# Version assertion: report what is actually running so a silently-reused
-# old image cannot masquerade as a successful update.
 if [ "$healthy" = "1" ]; then
   RUNNING_VERSION="$(curl -fsS --max-time 5 "$health_url" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n1)"
   info "running version: ${RUNNING_VERSION:-unknown}"
-  case "$RUNNING_VERSION" in
-    v1.0.0-beta1[01]*)
-      warn "container still reports the upstream version ($RUNNING_VERSION)."
-      warn "the fork image likely has not been published yet or is not present locally."
-      warn "check: docker images | grep axonhub  /  GitHub Actions -> Build and Push Docker Image"
-      ;;
-  esac
 fi
 
 if [ "$healthy" != "1" ]; then
-  dc logs --tail 30 axonhub >&2 || true
+  dc logs --tail 50 axonhub >&2 || true
   warn "health check failed, rolling back..."
   OLD_IMAGE="$(grep '^AXONHUB_IMAGE=' ".env.bak.$backup_stamp" 2>/dev/null | head -n1 | cut -d= -f2-)"
   if [ -n "$OLD_IMAGE" ] && [ "$OLD_IMAGE" != "$NEW_IMAGE" ]; then
     sed -i "s|^AXONHUB_IMAGE=.*|AXONHUB_IMAGE=$OLD_IMAGE|" .env
-    dc up -d --force-recreate --no-deps axonhub || true
+    AXONHUB_IMAGE="$OLD_IMAGE" dc up -d --force-recreate --no-deps axonhub || true
     for _ in $(seq 1 15); do
       if curl -fsS --max-time 5 "$health_url" >/dev/null 2>&1; then
         warn "rolled back to $OLD_IMAGE; check logs and retry"
@@ -221,9 +295,29 @@ if [ "$healthy" != "1" ]; then
   fail "update failed and could not recover; backups in $BACKUP_DIR / .env.bak.$backup_stamp"
 fi
 
+detect_public_ip() {
+  local candidate
+  for url in https://api.ipify.org https://ifconfig.me/ip https://ipinfo.io/ip; do
+    candidate="$(curl -fsS --connect-timeout 4 --max-time 8 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+    if printf '%s' "$candidate" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+      printf '%s\n' "$candidate"; return 0
+    fi
+  done
+  candidate="$(curl -fsS --connect-timeout 4 --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -n1 || true)"
+  [ -n "$candidate" ] && printf '%s\n' "$candidate"
+}
+
+PUBLIC_IP="$(detect_public_ip || true)"
 ok "update complete: $NEW_IMAGE"
 echo
 echo "verify:"
-echo "  curl $health_url"
+echo "  curl http://127.0.0.1:${HOST_PORT}/health"
+if [ -n "$PUBLIC_IP" ]; then
+  echo "  public health: curl http://${PUBLIC_IP}:${HOST_PORT}/health"
+  echo "  panel: http://${PUBLIC_IP}:${HOST_PORT}"
+fi
+case "${BIND_ADDRESS:-127.0.0.1}" in
+  127.*|localhost) warn "AxonHub currently binds to loopback; configure AXONHUB_BIND_ADDRESS plus firewall/reverse proxy for public access" ;;
+esac
 echo "  docker compose logs -f axonhub"
 echo "  backups: $BACKUP_DIR"
