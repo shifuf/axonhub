@@ -373,6 +373,29 @@ func (r *mutationResolver) TestChannel(ctx context.Context, input TestChannelInp
 	}, nil
 }
 
+// TestChannelQuota tests the current quota token without saving it.
+func (r *mutationResolver) TestChannelQuota(ctx context.Context, channelType string, baseURL string, quotaAPIKey string) (*TestChannelQuotaPayload, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return nil, fmt.Errorf("permission denied: write_channels scope required")
+	}
+
+	quotaData, err := r.providerQuotaService.TestQuota(ctx, channel.Type(channelType), baseURL, quotaAPIKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to test channel quota: %w", err)
+	}
+	quotaDataBytes, err := json.Marshal(quotaData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode quota result: %w", err)
+	}
+
+	return &TestChannelQuotaPayload{
+		ProviderType: quotaData.ProviderType,
+		Status:       quotaData.Status,
+		Ready:        quotaData.Ready,
+		QuotaData:    objects.JSONRawMessage(quotaDataBytes),
+	}, nil
+}
+
 // TestChannelAPIKeys is the resolver for the testChannelAPIKeys field.
 func (r *mutationResolver) TestChannelAPIKeys(ctx context.Context, channelID objects.GUID, modelID *string) (*TestChannelAPIKeysPayload, error) {
 	ctx = contexts.WithSource(ctx, request.SourceTest)

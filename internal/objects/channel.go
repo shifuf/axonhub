@@ -441,6 +441,10 @@ type ChannelCredentials struct {
 	// requests and never exposed to clients beyond credential write APIs.
 	ManagementAPIKey string `json:"managementApiKey,omitempty"`
 
+	// QuotaAPIKey is an optional credential used exclusively for provider quota
+	// checks. It is intentionally excluded from every inference-key accessor.
+	QuotaAPIKey string `json:"quotaApiKey,omitempty"`
+
 	// Azure configuration for the channel.
 	Azure *AzureCredential `json:"azure,omitempty"`
 

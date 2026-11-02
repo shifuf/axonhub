@@ -353,6 +353,7 @@ type ChannelRateLimit {
 type ChannelCredentials {
   apiKey: String
   apiKeys: [String!]
+  quotaApiKey: String
   keyGroups: [KeyGroup!]
   vertexApiKeys: [VertexAPIKey!]
   gcp: GCPCredential
@@ -406,6 +407,7 @@ type GCPCredential {
 input ChannelCredentialsInput {
   apiKey: String
   apiKeys: [String!]
+  quotaApiKey: String
   keyGroups: [KeyGroupInput!]
   vertexApiKeys: [VertexAPIKeyInput!]
   gcp: GCPCredentialInput
@@ -463,6 +465,13 @@ type TestChannelPayload {
   success: Boolean!
   message: String
   error: String
+}
+
+type TestChannelQuotaPayload {
+  providerType: String!
+  status: String!
+  ready: Boolean!
+  quotaData: JSONRawMessage!
 }
 
 type TestAPIKeyResult {
@@ -1030,6 +1039,7 @@ type Mutation {
   bulkRemoveChannelTags(ids: [ID!]!, tags: [String!]!): Boolean!
   bulkManageChannelTags(ids: [ID!]!, addTags: [String!]!, removeTags: [String!]!): Boolean!
   testChannel(input: TestChannelInput!): TestChannelPayload!
+  testChannelQuota(channelType: String!, baseURL: String!, quotaApiKey: String!): TestChannelQuotaPayload!
   testChannelAPIKeys(channelID: ID!, modelID: String): TestChannelAPIKeysPayload!
   testChannelAPIKey(channelID: ID!, key: String!, modelID: String): TestAPIKeyResult!
   bulkImportChannels(input: BulkImportChannelsInput!): BulkImportChannelsResult!

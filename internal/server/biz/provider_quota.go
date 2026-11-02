@@ -18,6 +18,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/providerquotastatus"
 	"github.com/looplj/axonhub/internal/ent/schema/schematype"
 	"github.com/looplj/axonhub/internal/log"
+	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/server/biz/provider_quota"
 	"github.com/looplj/axonhub/internal/server/scheduler"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -652,7 +653,11 @@ func (svc *ProviderQuotaService) ListResets(ctx context.Context, channelID int) 
 		return provider_quota.ResetList{}, fmt.Errorf("channel has no credentials")
 	}
 
-	resets, err := resetter.ListResets(ctx, ch)
+	resetChannel := ch
+	if supportsQuotaAPIKey(ch.Type) {
+		resetChannel = channelWithQuotaCredential(ch)
+	}
+	resets, err := resetter.ListResets(ctx, resetChannel)
 	resets.Supported = true
 	if err != nil {
 		return resets, fmt.Errorf("failed to list %s quota resets: %w", providerType, err)
@@ -689,7 +694,11 @@ func (svc *ProviderQuotaService) ResetChannelQuotaNow(ctx context.Context, chann
 		return fmt.Errorf("channel has no credentials")
 	}
 
-	if err := resetter.Reset(ctx, ch); err != nil {
+	resetChannel := ch
+	if supportsQuotaAPIKey(ch.Type) {
+		resetChannel = channelWithQuotaCredential(ch)
+	}
+	if err := resetter.Reset(ctx, resetChannel); err != nil {
 		return fmt.Errorf("failed to reset %s quota: %w", providerType, err)
 	}
 
@@ -798,6 +807,9 @@ func (svc *ProviderQuotaService) checkChannelQuota(ctx context.Context, group qu
 	}
 
 	if !hasCredentialsForProvider(ch) {
+		if supportsQuotaAPIKey(ch.Type) {
+			return
+		}
 		if err := svc.invalidateChannelQuotaLocked(ctx, ch.ID); err != nil {
 			log.Error(ctx, "Failed to invalidate provider quota after credentials disappeared",
 				log.Int("channel_id", ch.ID),
@@ -817,8 +829,19 @@ func (svc *ProviderQuotaService) checkChannelQuota(ctx context.Context, group qu
 		return
 	}
 
+	quotaChannel := ch
+	if supportsQuotaAPIKey(ch.Type) {
+		quotaChannel = channelWithQuotaCredential(ch)
+		if quotaChannel == nil {
+			return
+		}
+	}
+
 	// Make quota check request
-	quotaData, err := checker.CheckQuota(ctx, ch)
+	quotaData, err := checker.CheckQuota(ctx, quotaChannel)
+	if err != nil && supportsQuotaAPIKey(ch.Type) {
+		err = redactQuotaTokenError(err, quotaChannel.Credentials.APIKey)
+	}
 	if err != nil {
 		log.Error(ctx, "Quota check failed",
 			log.Int("channel_id", ch.ID),
@@ -837,7 +860,11 @@ func (svc *ProviderQuotaService) checkChannelQuota(ctx context.Context, group qu
 	resetList := provider_quota.ResetList{Supported: false}
 	if resetter, ok := checker.(provider_quota.Resetter); ok {
 		resetList.Supported = true
-		resetList, err = resetter.ListResets(ctx, ch)
+		resetChannel := ch
+		if supportsQuotaAPIKey(ch.Type) {
+			resetChannel = quotaChannel
+		}
+		resetList, err = resetter.ListResets(ctx, resetChannel)
 		resetList.Supported = true
 		if err != nil {
 			resetList.Error = err.Error()
@@ -860,6 +887,77 @@ func (svc *ProviderQuotaService) checkChannelQuota(ctx context.Context, group qu
 			log.String("provider", providerType),
 			log.String("status", memberQuotaData.Status),
 			log.Bool("ready", memberQuotaData.Ready))
+	}
+}
+
+// channelWithQuotaCredential returns a shallow channel copy using only the
+// dedicated quota credential for checkers that authenticate through APIKey.
+// Management-key checkers retain their established independent credential.
+func channelWithQuotaCredential(ch *ent.Channel) *ent.Channel {
+	if ch == nil || strings.TrimSpace(ch.Credentials.QuotaAPIKey) == "" {
+		return nil
+	}
+	copy := *ch
+	copy.Credentials = objects.ChannelCredentials{
+		APIKey: strings.TrimSpace(ch.Credentials.QuotaAPIKey),
+	}
+	return &copy
+}
+
+// TestQuota checks an unsaved token without persisting channel or quota state.
+func (svc *ProviderQuotaService) TestQuota(ctx context.Context, channelType channel.Type, baseURL, token string) (provider_quota.QuotaData, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return provider_quota.QuotaData{}, errors.New("quota token is required")
+	}
+	if !supportsQuotaAPIKey(channelType) {
+		return provider_quota.QuotaData{}, fmt.Errorf("quota token checks are not supported for channel type %q", channelType)
+	}
+	if channelType == channel.TypeOpenai || channelType == channel.TypeOpenaiResponses {
+		providerType := provider_quota.DetectProviderFromURL(strings.TrimSpace(baseURL))
+		if _, ok := provider_quota.URLDetectedProviders()[providerType]; !ok {
+			return provider_quota.QuotaData{}, errors.New("quota token checks are not supported for this OpenAI-compatible URL")
+		}
+	}
+
+	ch := &ent.Channel{
+		Type:    channelType,
+		BaseURL: strings.TrimSpace(baseURL),
+		Credentials: objects.ChannelCredentials{
+			QuotaAPIKey: token,
+		},
+	}
+	providerType := svc.getProviderType(ch)
+	checker, ok := svc.checkers[providerType]
+	if !ok || !checker.SupportsChannel(ch) {
+		return provider_quota.QuotaData{}, fmt.Errorf("no quota checker available for channel type %q", channelType)
+	}
+
+	quotaData, err := checker.CheckQuota(ctx, channelWithQuotaCredential(ch))
+	if err != nil {
+		return provider_quota.QuotaData{}, redactQuotaTokenError(err, token)
+	}
+	return provider_quota.NormalizeQuotaData(quotaData), nil
+}
+
+func redactQuotaTokenError(err error, token string) error {
+	message := strings.ReplaceAll(err.Error(), token, "[REDACTED]")
+	return errors.New(message)
+}
+
+func supportsQuotaAPIKey(channelType channel.Type) bool {
+	switch channelType { //nolint:exhaustive
+	case channel.TypeNanogpt, channel.TypeNanogptResponses,
+		channel.TypeCline,
+		channel.TypeMinimax, channel.TypeMinimaxAnthropic,
+		channel.TypeZhipu, channel.TypeZhipuAnthropic,
+		channel.TypeZai, channel.TypeZaiAnthropic,
+		channel.TypeOpencodeGo, channel.TypeOpencodeGoAnthropic,
+		channel.TypeMoonshotCoding,
+		channel.TypeOpenai, channel.TypeOpenaiResponses:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1054,33 +1152,18 @@ func hasCredentialsForProvider(ch *ent.Channel) bool {
 		return strings.TrimSpace(ch.Credentials.ManagementAPIKey) != ""
 	default:
 	}
+	if supportsQuotaAPIKey(ch.Type) && !(ch.Type == channel.TypeOpenai || ch.Type == channel.TypeOpenaiResponses) {
+		return strings.TrimSpace(ch.Credentials.QuotaAPIKey) != ""
+	}
 
 	if ch.Type == channel.TypeOpenai || ch.Type == channel.TypeOpenaiResponses {
 		providerType := provider_quota.DetectProviderFromURL(ch.BaseURL)
 		if _, ok := provider_quota.URLDetectedProviders()[providerType]; ok {
-			return strings.TrimSpace(ch.Credentials.APIKey) != "" || len(ch.Credentials.APIKeys) > 0
+			return strings.TrimSpace(ch.Credentials.QuotaAPIKey) != ""
 		}
-	}
-
-	if ch.Type == channel.TypeCodex || ch.Type == channel.TypeClaudecode || ch.Type == channel.TypeXaiSubscription {
-		return ch.Credentials.OAuth != nil || isOAuthJSON(ch.Credentials.APIKey)
-	}
-
-	if ch.Type == channel.TypeCline {
-		if strings.TrimSpace(ch.Credentials.APIKey) != "" {
-			return true
-		}
-		for _, apiKey := range ch.Credentials.APIKeys {
-			if strings.TrimSpace(apiKey) != "" {
-				return true
-			}
-		}
-		return false
 	}
 
 	if isCommandCodeChannelType(ch.Type) {
-		// Command Code quota collection authenticates with the account API key
-		// (/alpha/billing/*), or with the Studio session cookie as a fallback.
 		return provider_quota.HasCommandCodeQuotaCredentials(ch)
 	}
 
@@ -1093,6 +1176,10 @@ func hasCredentialsForProvider(ch *ent.Channel) bool {
 
 		_, err := provider_quota.NormalizeOllamaCookie(ch.Settings.ProviderQuota.Ollama.AuthCookie)
 		return err == nil
+	}
+
+	if ch.Type == channel.TypeCodex || ch.Type == channel.TypeClaudecode || ch.Type == channel.TypeXaiSubscription {
+		return ch.Credentials.OAuth != nil || isOAuthJSON(ch.Credentials.APIKey)
 	}
 
 	return ch.Credentials.OAuth != nil || isOAuthJSON(ch.Credentials.APIKey) ||

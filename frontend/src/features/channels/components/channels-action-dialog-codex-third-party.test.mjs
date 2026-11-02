@@ -58,7 +58,7 @@ test('a copied OAuth row switched to third-party submits no OAuth JSON and keeps
 
   // The submit payload itself must be the sanitized credential.
   assert.match(submit, /const valuesForSubmit = isEdit/);
-  assert.match(submit, /credentials:\s*credentials\s*\n\s*\? getCodexThirdPartySubmitCredentials\(credentials/);
+  assert.match(submit, /credentials:\s*credentials\s*\n\s*\? getCodexThirdPartySubmitCredentials\(\{[\s\S]*?quotaApiKey: supportsQuotaAPIKey \? credentials\.quotaApiKey\?\.trim\(\)/);
   assert.match(submit, /type: valuesForSubmit\.type,/);
 });
 

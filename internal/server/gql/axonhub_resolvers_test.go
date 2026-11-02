@@ -13,6 +13,8 @@ import (
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/enttest"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/scopes"
+	"github.com/looplj/axonhub/internal/server/biz"
 )
 
 func setupTestQueryResolver(t *testing.T) (*queryResolver, context.Context, *ent.Client) {
@@ -26,6 +28,31 @@ func setupTestQueryResolver(t *testing.T) (*queryResolver, context.Context, *ent
 	resolver := &queryResolver{&Resolver{client: client}}
 
 	return resolver, ctx, client
+}
+
+func TestMutationResolver_TestChannelQuotaRequiresWriteChannelsScope(t *testing.T) {
+	resolver := &mutationResolver{&Resolver{}}
+
+	result, err := resolver.TestChannelQuota(context.Background(), string(channel.TypeNanogpt), "https://nano-gpt.com", "sensitive-token")
+
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "write_channels")
+}
+
+func TestMutationResolver_TestChannelQuotaReturnsNormalizedQuotaWithoutEchoingToken(t *testing.T) {
+	ctx := contexts.WithUser(context.Background(), &ent.User{
+		ID:     1,
+		Scopes: []string{string(scopes.ScopeWriteChannels)},
+	})
+	service := &biz.ProviderQuotaService{}
+	resolver := &mutationResolver{&Resolver{providerQuotaService: service}}
+
+	_, err := resolver.TestChannelQuota(ctx, string(channel.TypeNanogpt), "https://nano-gpt.com", "sensitive-token")
+
+	// A service with no registered checker fails safely, and the credential is
+	// never reflected into the GraphQL error.
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "sensitive-token")
 }
 
 func TestQueryResolver_AllChannelSummarys_ProjectProfileUsesIntersection(t *testing.T) {

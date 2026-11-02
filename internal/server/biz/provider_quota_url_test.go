@@ -98,7 +98,7 @@ func TestHasCredentialsForProvider_SyntheticAPIKey(t *testing.T) {
 		Type:    channel.TypeOpenai,
 		BaseURL: "https://api.synthetic.new",
 		Credentials: objects.ChannelCredentials{
-			APIKey: "sk-test",
+			QuotaAPIKey: "sk-test",
 		},
 	}
 	require.True(t, hasCredentialsForProvider(ch))
@@ -129,7 +129,7 @@ func TestHasCredentialsForProvider_SyntheticAPIKeys(t *testing.T) {
 		Type:    channel.TypeOpenai,
 		BaseURL: "https://api.synthetic.new",
 		Credentials: objects.ChannelCredentials{
-			APIKeys: []string{"sk-test"},
+			QuotaAPIKey: "sk-test",
 		},
 	}
 	require.True(t, hasCredentialsForProvider(ch))
@@ -262,7 +262,7 @@ func TestGetProviderType_Cline(t *testing.T) {
 func TestHasCredentialsForProvider_ClineAPIKey(t *testing.T) {
 	ch := &ent.Channel{
 		Type:        channel.TypeCline,
-		Credentials: objects.ChannelCredentials{APIKey: "cline-key"},
+		Credentials: objects.ChannelCredentials{QuotaAPIKey: "cline-key"},
 	}
 	require.True(t, hasCredentialsForProvider(ch))
 }
@@ -270,7 +270,7 @@ func TestHasCredentialsForProvider_ClineAPIKey(t *testing.T) {
 func TestHasCredentialsForProvider_ClineAPIKeys(t *testing.T) {
 	ch := &ent.Channel{
 		Type:        channel.TypeCline,
-		Credentials: objects.ChannelCredentials{APIKeys: []string{"cline-key"}},
+		Credentials: objects.ChannelCredentials{QuotaAPIKey: "cline-key"},
 	}
 	require.True(t, hasCredentialsForProvider(ch))
 }

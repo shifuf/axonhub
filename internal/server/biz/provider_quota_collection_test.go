@@ -48,18 +48,22 @@ func (c *failingQuotaChecker) SupportsChannel(*ent.Channel) bool {
 type countingQuotaResetter struct {
 	countingQuotaChecker
 
-	listCalls  atomic.Int32
-	resetCalls atomic.Int32
-	resets     provider_quota.ResetList
+	listCalls   atomic.Int32
+	resetCalls  atomic.Int32
+	resets      provider_quota.ResetList
+	listAPIKey  string
+	resetAPIKey string
 }
 
-func (c *countingQuotaResetter) ListResets(context.Context, *ent.Channel) (provider_quota.ResetList, error) {
+func (c *countingQuotaResetter) ListResets(_ context.Context, ch *ent.Channel) (provider_quota.ResetList, error) {
 	c.listCalls.Add(1)
+	c.listAPIKey = ch.Credentials.APIKey
 	return c.resets, nil
 }
 
-func (c *countingQuotaResetter) Reset(context.Context, *ent.Channel) error {
+func (c *countingQuotaResetter) Reset(_ context.Context, ch *ent.Channel) error {
 	c.resetCalls.Add(1)
+	c.resetAPIKey = ch.Credentials.APIKey
 	return nil
 }
 
@@ -405,6 +409,11 @@ func TestProviderQuotaService_ListResets_UsesOptionalResetter(t *testing.T) {
 	}
 	service.checkers["minimax"] = resetter
 	channelEntity := createProviderQuotaCollectionChannel(t, ctx, client, "MiniMax", channel.TypeMinimax)
+	channelEntity.Credentials.QuotaAPIKey = "test-quota-key"
+	_, err := client.Channel.UpdateOneID(channelEntity.ID).
+		SetCredentials(channelEntity.Credentials).
+		Save(ctx)
+	require.NoError(t, err)
 
 	resets, err := service.ListResets(ctx, channelEntity.ID)
 
@@ -412,4 +421,27 @@ func TestProviderQuotaService_ListResets_UsesOptionalResetter(t *testing.T) {
 	require.True(t, resets.Supported)
 	require.Len(t, resets.Resets, 1)
 	require.EqualValues(t, 1, resetter.listCalls.Load())
+	require.Equal(t, "test-quota-key", resetter.listAPIKey)
+}
+
+func TestProviderQuotaService_ResetChannelQuotaNow_UsesDedicatedQuotaToken(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+
+	resetter := &countingQuotaResetter{
+		countingQuotaChecker: countingQuotaChecker{providerType: "minimax"},
+	}
+	service.checkers["minimax"] = resetter
+	channelEntity := createProviderQuotaCollectionChannel(t, ctx, client, "MiniMax", channel.TypeMinimax)
+	channelEntity.Credentials.QuotaAPIKey = "test-quota-key"
+	_, err := client.Channel.UpdateOneID(channelEntity.ID).
+		SetCredentials(channelEntity.Credentials).
+		Save(ctx)
+	require.NoError(t, err)
+
+	err = service.ResetChannelQuotaNow(ctx, channelEntity.ID)
+
+	require.NoError(t, err)
+	require.EqualValues(t, 1, resetter.resetCalls.Load())
+	require.Equal(t, "test-quota-key", resetter.resetAPIKey)
 }

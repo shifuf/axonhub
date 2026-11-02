@@ -40,6 +40,8 @@ import {
   testChannelAPIKeysPayloadSchema,
   TestAPIKeyResult,
   testAPIKeyResultSchema,
+  TestChannelQuotaPayload,
+  testChannelQuotaPayloadSchema,
   DetectedChannelEndpoint,
   detectedChannelEndpointSchema,
 } from './schema';
@@ -561,6 +563,17 @@ const TEST_CHANNEL_MUTATION = `
       success
       error
       message
+    }
+  }
+`;
+
+const TEST_CHANNEL_QUOTA_MUTATION = `
+  mutation TestChannelQuota($channelType: String!, $baseURL: String!, $quotaApiKey: String!) {
+    testChannelQuota(channelType: $channelType, baseURL: $baseURL, quotaApiKey: $quotaApiKey) {
+      providerType
+      status
+      ready
+      quotaData
     }
   }
 `;
@@ -1128,6 +1141,7 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
           credentials {
             apiKey
             apiKeys
+            quotaApiKey
             keyGroups {
               name
               apiKeys
@@ -2081,6 +2095,22 @@ export function useBulkManageChannelTags() {
     },
     onError: () => {
       queryClient.invalidateQueries({ queryKey: ['selectedChannelTags'] });
+    },
+  });
+}
+
+export function useTestChannelQuota() {
+  const { handleError } = useErrorHandler();
+
+  return useMutation({
+    mutationFn: async (input: { channelType: string; baseURL: string; quotaApiKey: string }): Promise<TestChannelQuotaPayload> => {
+      try {
+        const data = await graphqlRequest<{ testChannelQuota: TestChannelQuotaPayload }>(TEST_CHANNEL_QUOTA_MUTATION, input);
+        return testChannelQuotaPayloadSchema.parse(data.testChannelQuota);
+      } catch (error) {
+        handleError(error, { context: 'Test Channel Quota' });
+        throw error;
+      }
     },
   });
 }

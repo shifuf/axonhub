@@ -114,6 +114,18 @@ func TestGetEnabledAPIKeysWithKeyGroups(t *testing.T) {
 	})
 }
 
+func TestQuotaAPIKeyIsNeverAnInferenceCredential(t *testing.T) {
+	credentials := ChannelCredentials{
+		APIKey:      "inference-key",
+		APIKeys:     []string{"inference-key-2"},
+		QuotaAPIKey: "quota-only-key",
+	}
+
+	require.Equal(t, []string{"inference-key", "inference-key-2"}, credentials.GetAllAPIKeys())
+	require.NotContains(t, credentials.GetAllCredentialRefs(), "quota-only-key")
+	require.NotContains(t, credentials.GetEnabledAPIKeys(nil), "quota-only-key")
+}
+
 func TestEnabledGroupKeys(t *testing.T) {
 	credentials := &ChannelCredentials{
 		KeyGroups: []KeyGroup{
