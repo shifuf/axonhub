@@ -2,14 +2,14 @@
 # AxonHub one-shot updater for existing Docker Compose deployments.
 #
 # Usage:
-#   bash axonhub-update.sh                 # latest stable release archive
-#   bash axonhub-update.sh v1.0.0-beta14   # exact release archive
-#   bash axonhub-update.sh dev-1bc55dd     # legacy ghcr dev image
+#   bash axonhub-update.sh             # latest fork dev release archive
+#   bash axonhub-update.sh dev-f95e5908 # exact fork dev release archive
+#   bash axonhub-update.sh vX.Y.Z      # exact upstream-style release archive
 #
 # Env:
 #   AXONHUB_DIR     deployment directory (default: auto-detect)
 #   IMAGE           explicit image reference (registry mode)
-#   USE_REGISTRY=1  force registry mode for a v* tag
+#   USE_REGISTRY=1  force registry mode instead of downloading an archive
 #   RELEASE_PROXY   release download proxy (default: https://gh-proxy.com/)
 #   PULL_IMAGES=1   run docker compose pull in registry mode
 #   SKIP_BACKUP=1   skip the pre-update backup (not recommended)
@@ -205,7 +205,7 @@ resolve_registry_image() {
 }
 
 case "$TARGET" in
-  latest|v*)
+  latest|v*|dev-*)
     if [ -n "$IMAGE" ] || [ "$USE_REGISTRY" = "1" ]; then
       resolve_registry_image "$TARGET"
       REGISTRY_MODE=1
@@ -213,10 +213,6 @@ case "$TARGET" in
       load_release_image "$TARGET"
       REGISTRY_MODE=0
     fi
-    ;;
-  dev-*)
-    resolve_registry_image "$TARGET"
-    REGISTRY_MODE=1
     ;;
   *)
     fail "unsupported target '$TARGET' (use latest, vX.Y.Z, or dev-<sha>)"

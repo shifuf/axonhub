@@ -37,7 +37,7 @@ jobs:
     name: Build & push (dev)
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       # Required to push the image to GitHub Container Registry.
       packages: write
     env:
@@ -52,11 +52,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Stamp VERSION
+      - name: Resolve dev version
+        id: version
         run: |
           SHA=$(git rev-parse --short HEAD)
-          echo "dev-${SHA}" > internal/build/VERSION
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=dev-${SHA}" >> "$GITHUB_OUTPUT"
           echo "Building dev-${SHA}"
+
+      - name: Stamp VERSION
+        env:
+          VERSION: ${{ steps.version.outputs.image_tag }}
+        run: echo "$VERSION" > internal/build/VERSION
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -86,6 +93,7 @@ jobs:
           else
             echo "images=${GHCR}" >> "$GITHUB_OUTPUT"
           fi
+          echo "ghcr=${GHCR}" >> "$GITHUB_OUTPUT"
 
       - name: Extract Docker metadata
         id: meta
@@ -93,7 +101,7 @@ jobs:
         with:
           images: ${{ steps.image.outputs.images }}
           tags: |
-            type=sha,prefix=dev-
+            type=raw,value=${{ steps.version.outputs.image_tag }}
             type=raw,value=latest
             type=raw,value=cn,enable=true
 
@@ -122,3 +130,47 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Pull published image for archive export
+        env:
+          IMAGE: ${{ steps.image.outputs.ghcr }}:${{ steps.version.outputs.image_tag }}
+        run: docker pull "$IMAGE"
+
+      - name: Export image for mainland mirrors
+        env:
+          IMAGE: ${{ steps.image.outputs.ghcr }}:${{ steps.version.outputs.image_tag }}
+          VERSION_TAG: ${{ steps.version.outputs.image_tag }}
+        run: |
+          VERSIONED="axonhub-${VERSION_TAG}-linux-amd64.tar.gz"
+          LATEST="axonhub-linux-amd64.tar.gz"
+          docker save "$IMAGE" | gzip -9 > "$VERSIONED"
+          cp "$VERSIONED" "$LATEST"
+          sha256sum "$VERSIONED" | awk '{print $1}' > "$VERSIONED.sha256"
+          cp "$VERSIONED.sha256" "$LATEST.sha256"
+          ls -lh "$VERSIONED" "$LATEST"
+
+      - name: Publish dev GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_TAG: ${{ steps.version.outputs.image_tag }}
+          IMAGE: ${{ steps.image.outputs.ghcr }}:${{ steps.version.outputs.image_tag }}
+        run: |
+          TITLE="AxonHub ${VERSION_TAG}"
+          NOTES=$(printf 'Fork dev build from %s.\n\nImage: %s\n\nUse deploy/axonhub-update.sh for the domestic archive updater.' \
+            "$GITHUB_SHA" "$IMAGE")
+          if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
+            gh release edit "$VERSION_TAG" --title "$TITLE" --notes "$NOTES" --latest
+          else
+            gh release create "$VERSION_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --latest
+          fi
+          gh release upload "$VERSION_TAG" \
+            "axonhub-${VERSION_TAG}-linux-amd64.tar.gz" \
+            "axonhub-${VERSION_TAG}-linux-amd64.tar.gz.sha256" \
+            "axonhub-linux-amd64.tar.gz" \
+            "axonhub-linux-amd64.tar.gz.sha256" \
+            "deploy/axonhub-update.sh" \
+            --clobber
